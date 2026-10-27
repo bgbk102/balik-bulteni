@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Balık Bülteni</title>
+<meta name="description" content="Bağla Ilgınlar, Karaincir, Akyarlar ve Aspat için 7 günlük kıyıdan LRF balık tahmini.">
+<meta name="theme-color" content="#08202b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="appbar">
+  <div>
+    <h1>Balık Bülteni</h1>
+    <p class="sub" id="status">Tahmin yükleniyor…</p>
+  </div>
+  <button class="icon-btn" id="refresh" type="button" aria-label="Yenile">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</header>
+
+<main>
+  <section class="tab" id="tab-gun" aria-label="Gün">
+    <div class="strip" id="strip" role="tablist" aria-label="Gün seç"></div>
+    <div id="day"></div>
+  </section>
+  <section class="tab" id="tab-hafta" aria-label="Hafta" hidden></section>
+  <section class="tab" id="tab-harita" aria-label="Harita" hidden>
+    <div class="card map-card"><div id="map"></div></div>
+    <div id="map-legend"></div>
+  </section>
+  <section class="tab" id="tab-defter" aria-label="Defter ve rehber" hidden></section>
+</main>
+
+<nav class="tabbar" aria-label="Bölümler">
+  <button type="button" data-tab="gun" aria-current="page">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span>Gün</span></button>
+  <button type="button" data-tab="hafta">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V11M10 20V5M16 20v-7M22 20H2" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg>
+    <span>Hafta</span></button>
+  <button type="button" data-tab="harita">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-6.2-6.5-11a6.5 6.5 0 0 1 13 0c0 4.8-6.5 11-6.5 11z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="10" r="2.3" fill="currentColor"/></svg>
+    <span>Harita</span></button>
+  <button type="button" data-tab="defter">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11l3 3v15H5z M9 9h7M9 13h7M9 17h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <span>Defter</span></button>
+</nav>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

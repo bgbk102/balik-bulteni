@@ -1,0 +1,17 @@
+{
+  "name": "Balık Bülteni",
+  "short_name": "Balık",
+  "description": "Bağla Ilgınlar, Karaincir, Akyarlar ve Aspat için 7 günlük kıyıdan LRF balık tahmini.",
+  "lang": "tr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#061820",
+  "theme_color": "#08202b",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

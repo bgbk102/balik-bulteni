@@ -1,0 +1,20 @@
+{
+  "updated": "2026-10-27T22:00:00+03:00",
+  "headline": "Haftanın adayları: 29 Ekim sabahı (cephe sonrası karayel, koylar düz) ve 30 Ekim akşamı (sakin deniz, kalamar).",
+  "days": {
+    "2026-10-28": {
+      "note": "Cephe günü. Sabah keşişleme ve yağmur Ilgınlar'a karşıdan geliyor; rüzgâr akşam karayele dönünce koylar sakinleşir.",
+      "alert": "MGM Güney Ege açıkları için fırtınamsı rüzgâr ve Muğla için kuvvetli yağış uyarısı veriyor. Gök gürültüsünde kıyıdan uzaklaş."
+    },
+    "2026-10-29": {
+      "note": "Yağmurdan sonra Bağla ve Karaincir kumsallarının ortası çamurlu olabilir; kayalık uçlara git."
+    }
+  },
+  "defter": [
+    { "spot": "Bağla – Ilgınlar", "species": "Hani", "freq": "Çok", "note": "Ana nokta, kıyıda en güvenilir tür." },
+    { "spot": "Bağla – Ilgınlar", "species": "Kızıldeniz barbunu", "freq": "Ara sıra", "note": "Kum-kaya geçişinde dipten. İstilacı tür." },
+    { "spot": "Bağla – Ilgınlar", "species": "Lahoz", "freq": "1 kez", "note": "Kaya dibi. Asgari boyu tebliğden kontrol et." },
+    { "spot": "Bağla – Ilgınlar", "species": "Sargoz", "freq": "1 kez", "note": "Dalgalı kayalık önü." },
+    { "spot": "Bağla – Ilgınlar (dalış)", "species": "Çipura", "freq": "Gözlemde çok", "note": "Suda bol, sahteye kıyıdan az geliyor." }
+  ]
+}
