@@ -2,7 +2,7 @@ import { SPOTS, WINDOWS, SPECIES, PHASES, LEVELS, levelOf, buildDays, calibrate,
 
 const WX_POINT = { lat: 36.97, lon: 27.33 };   // Bağla–Karaincir arası kara noktası (rüzgâr, basınç, yağış)
 const SEA_POINT = { lat: 36.93, lon: 27.33 };  // koyların hemen açığı (dalga, deniz suyu, akıntı)
-const CACHE_KEY = 'bb-forecast-v2', LOG_KEY = 'bb-log-v1', SPOT_KEY = 'bb-spot';
+const CACHE_KEY = 'bb-forecast-v2', LOG_KEY = 'bb-log-v1', SPOT_KEY = 'bb-spot', POS_KEY = 'bb-pos-v1';
 const TR_DAYS = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 const TR_DAYS_LONG = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
 const TR_MONTHS = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
@@ -10,7 +10,7 @@ const MON_SHORT = ['O', 'Ş', 'M', 'N', 'M', 'H', 'T', 'A', 'E', 'E', 'K', 'A'];
 const PHASE_NAMES = { tan: 'Tan', sabah: 'Sabah', ogle: 'Öğle', ikindi: 'İkindi', batim: 'Gün batımı', gece: 'Gece' };
 const LVL_HEX = ['#ff6b5e', '#f59a4a', '#f2cc4b', '#4fd68e', '#2fe3c2'];
 
-const state = { all: [], base: [], days: [], sel: 0, tab: 'gun', spot: 'ilginlar', log: [], off: null, raw: null, fetchedAt: null, live: true, map: null, mapLayer: null };
+const state = { all: [], base: [], days: [], sel: 0, tab: 'gun', spot: 'ilginlar', log: [], off: null, raw: null, fetchedAt: null, live: true, map: null, mapLayer: null, editPos: false };
 const $ = s => document.querySelector(s);
 const pad = n => String(n).padStart(2, '0');
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -385,12 +385,28 @@ function renderMap() {
   SPOTS.forEach(sp => {
     const ws = d.windows.filter(w => w.score != null).map(w => ({ w, b: w.bySpot.find(x => x.spot.id === sp.id) })), top = ws.reduce((a, b) => (b.b.score > a.b.score ? b : a));
     const icon = L.divIcon({ className: '', html: `<div class="pin" style="background:${hex(top.b.score)}">${fmt(top.b.score)}</div>`, iconSize: [42, 42], iconAnchor: [21, 21] });
-    L.marker([sp.lat, sp.lon], { icon, title: sp.name }).addTo(state.mapLayer).bindPopup(`<b>${esc(sp.name)}</b><br>En iyi: ${top.w.name.toLowerCase()} ${fmt(top.b.score)} · koşul ${fmt(top.b.cond)}<br>${esc(sp.tip)}`);
+    const mk = L.marker([sp.lat, sp.lon], { icon, title: sp.name, draggable: state.editPos }).addTo(state.mapLayer);
+    mk.on('dragend', () => { const ll = mk.getLatLng(); sp.lat = +ll.lat.toFixed(5); sp.lon = +ll.lng.toFixed(5); savePos(); renderMap(); });
+    if (!state.editPos) mk.bindPopup(`<b>${esc(sp.name)}</b><br>En iyi: ${top.w.name.toLowerCase()} ${fmt(top.b.score)} · koşul ${fmt(top.b.cond)}<br>${esc(sp.tip)}`);
   });
   setTimeout(() => state.map.invalidateSize(), 50);
   const s = d.summary;
-  $('#map-legend').innerHTML = `<div class="card row">${arrowSvg(s.dirMorning ?? 0, 24, '#9fe3f2')}<span class="sm"><b>${dParts(d.date).label}</b> · ${windName(s.dirMorning ?? 0)} ${Math.round(s.windMin)}–${Math.round(s.windMax)} kn. İşaretlerdeki sayı o noktanın günün en iyi dilimindeki av şansı. Konumlar yaklaşıktır.</span></div>`;
+  $('#map-legend').innerHTML = `<div class="card row">${arrowSvg(s.dirMorning ?? 0, 24, '#9fe3f2')}<span class="sm"><b>${dParts(d.date).label}</b> · ${windName(s.dirMorning ?? 0)} ${Math.round(s.windMin)}–${Math.round(s.windMax)} kn. İşaretlerdeki sayı o noktanın günün en iyi dilimindeki av şansı. Konumlar yaklaşıktır.</span></div>` +
+    `<div class="card"><div class="section-h"><h2>Konumları düzelt</h2>${state.editPos ? '<button class="linkbtn" id="pos-done" type="button">Bitti</button>' : '<button class="linkbtn" id="pos-edit" type="button">Düzenle</button>'}</div>
+      <p class="sm muted">${state.editPos ? 'Yuvarlak işarete basılı tutup atış yaptığın yere sürükle. Yakınlaştırırsan daha kolay olur. Bıraktığın an kaydedilir.' : 'İşaretler yanlış yerdeyse Düzenle\'ye bas, her birini kıyıda durduğun yere sürükle. Konumlar bu telefonda saklanır.'}</p>
+      ${hasPos() ? `<p class="xs num mt">${SPOTS.map(sp => `${esc(sp.short)}: ${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}`).join('<br>')}</p><div class="row mt"><button class="linkbtn" id="pos-copy" type="button">Koordinatları kopyala</button><button class="linkbtn" id="pos-reset" type="button">Sıfırla</button></div>` : ''}</div>`;
+  const on = (id, f) => { const b = $(id); if (b) b.addEventListener('click', f); };
+  on('#pos-edit', () => { state.editPos = true; renderMap(); });
+  on('#pos-done', () => { state.editPos = false; renderMap(); });
+  on('#pos-reset', () => { try { localStorage.removeItem(POS_KEY); } catch (e) {} SPOTS.forEach(sp => { sp.lat = DEFAULT_POS[sp.id][0]; sp.lon = DEFAULT_POS[sp.id][1]; }); renderMap(); });
+  on('#pos-copy', async () => { const txt = SPOTS.map(sp => `${sp.id}: ${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}`).join('\n'); try { await navigator.clipboard.writeText(txt); $('#pos-copy').textContent = 'Kopyalandı'; } catch (e) {} });
 }
+
+// Kullanıcının düzelttiği nokta konumları (yalnızca haritadaki yer; puanı etkilemez)
+const DEFAULT_POS = Object.fromEntries(SPOTS.map(sp => [sp.id, [sp.lat, sp.lon]]));
+function savePos() { store(POS_KEY, Object.fromEntries(SPOTS.map(sp => [sp.id, [sp.lat, sp.lon]]))); }
+function hasPos() { return SPOTS.some(sp => sp.lat !== DEFAULT_POS[sp.id][0] || sp.lon !== DEFAULT_POS[sp.id][1]); }
+function loadPos() { const p = read(POS_KEY, null); if (!p) return; SPOTS.forEach(sp => { const v = p[sp.id]; if (Array.isArray(v) && isFinite(v[0]) && isFinite(v[1])) { sp.lat = v[0]; sp.lon = v[1]; } }); }
 
 // ---------- defter ----------
 function renderDefter() {
@@ -475,6 +491,7 @@ window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferr
 document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 $('#refresh').addEventListener('click', load);
 state.log = read(LOG_KEY, []);
+loadPos();
 const savedSpot = read(SPOT_KEY, 'ilginlar'); state.spot = (savedSpot === 'best' || SPOTS.some(s => s.id === savedSpot)) ? savedSpot : 'ilginlar';
 $('#day').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
 renderSpotbar();
