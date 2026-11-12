@@ -1,30 +1,46 @@
 # Balık Bülteni
 
-Bodrum yarımadasının güneybatısında (Bağla – Ilgınlar, Karaincir, Akyarlar, Aspat) kıyıdan LRF için 7 günlük balık tahmini. Telefona "Ana ekrana ekle" ile kurulan bir web uygulamasıdır.
+Bodrum yarımadasının güneybatısında (Bağla – Ilgınlar, Karaincir, Akyarlar, Aspat) kıyıdan LRF için av tahmini. Telefona "Ana ekrana ekle" ile kurulan bir web uygulamasıdır.
 
 ## Nasıl çalışır
 
-- Uygulama her açılışta [Open-Meteo](https://open-meteo.com)'dan saatlik rüzgâr, hamle, basınç, yağış, bulut, sıcaklık ve dalga / deniz suyu tahminini çeker.
-- `js/engine.js` her saat ve her nokta için 1–10 puan hesaplar; puanlar sabah, öğlen, akşam ve gece dilimlerine ve günlere toplanır.
-- `data/insights.json` Claude'un her sabah yazdığı notları (MGM uyarıları, gün yorumları, haftalık özet) ve av defterini tutar.
+- Uygulama her açılışta [Open-Meteo](https://open-meteo.com)'dan son 31 gün ve önümüzdeki 7 gün için saatlik rüzgâr, hamle, basınç, yağış, bulut, dalga (yükseklik, yön, periyot), deniz suyu sıcaklığı ve akıntı verisini çeker.
+- `js/engine.js` iki ayrı puan hesaplar:
+  - **Koşul (0–10):** o saatte o noktada rahat ve güvenli atış yapılabilir mi.
+  - **Av şansı (0–10):** sahteye gelecek bir tür o saatte o noktada aktif mi.
+- Av defteri telefonda (`localStorage`) tutulur. Her kayıt, modelin o gün için verdiği puanla karşılaştırılır ve puanlar buna göre kaydırılır.
 - Çevrimdışıyken son kayıtlı tahmin gösterilir.
 
 ## Puanlama
 
+### Koşul
+
 | Etken | Kural |
 |---|---|
-| Rüzgâr | 4–12 kn +1; karadan (arkadan) esiyorsa +0,5. 13–18 kn denizden −1. 18 kn üstü ya da 25 kn hamle −2,5 |
-| Dalga (kıyıda) | ≤0,5 m +1; 0,8–1 m −1; 1 m üstü −2,5. Kıyı dalgası açık deniz dalgasından rüzgârın kıyıya göre yönüyle hesaplanır |
-| Basınç (12 saat) | ≤ −2 hPa +1,5; hafif düşüş +1; ≥ +3 hPa −1,5; 1010–1020 +0,5; 1025 üstü −1 |
-| Işık | Sabah ve akşam +1,5. Öğlen bulutlu +0,5, güneşli −0,5. Kuvvetli yağış −1 |
-| Gece | Ay %80 üstü −0,5, %20 altı +0,5 |
-| Su | 13 °C altı −1; 3 günde 2 °C'den fazla soğuma −1; son 48 saatte 10 mm üstü yağış +0,3 |
+| Karşıdan rüzgâr | 6 kn üstü −1, 10 üstü −3, 14 üstü −5, 18 üstü −7 |
+| Yandan rüzgâr | 10 kn üstü −1,5, 14 üstü −3, 18 üstü −5 |
+| Arkadan rüzgâr | 18 kn üstü −3 |
+| Hamle | 25 kn üstü −3 |
+| Kıyıdaki dalga | 0,6 m üstü −1,5, 0,9 üstü −4, 1,2 üstü −7 |
+| Yağış | 0,5 mm/sa üstü −1, 3 üstü −3 |
 
-Taban puan 3,5'tir. Gün puanı en iyi dilimin %65'i ile ikinci en iyi dilimin %35'idir.
+Kıyıdaki dalga = açık deniz dalgası × (0,25 + 0,85 × kıyının dalga yönüne açıklığı).
+
+### Av şansı
+
+Her tür için aktiflik = mevsim (ay) × ışık evresi (tan, sabah, öğle, ikindi, gün batımı, gece) × su sıcaklığı ve deniz durumu çarpanları × noktanın uygunluğu × sahteyle tutulabilirlik. Tür profilleri `SPECIES` listesindedir.
+
+Türler bağımsız küçük ihtimaller olarak birleştirilir: `şans = 10 × (1 − Π(1 − 0,3 × aktiflik))`. Koşul 6'nın altındaysa şans orantılı kırpılır.
+
+Basınç yalnızca avcı türlerde, 12 saatte 3 hPa'dan fazla düşüşte %10 artı verir. Ay evresi yalnızca ışıksız noktada parlak gecede %10 eksi verir. İkisinin de kanıtı zayıftır.
+
+### Defter düzeltmesi
+
+`düzeltme = (gerçekleşen balıklı av oranı − modelin beklediği oran) × 6 × n / (n + 3)`, −3 ile +2 arasında. En az üç kaydı olan dilim ve noktalar için ayrıca ek düzeltme hesaplanır.
 
 ## Noktalar
 
-Dördü de güneye bakar: kuzeyli rüzgârlar (poyraz, yıldız, karayel) kıyıdan eser ve koyları düzleştirir. Nokta koordinatları ve kıyı yönleri `js/engine.js` içindeki `SPOTS` listesindedir ve yaklaşıktır.
+Dördü de güneye bakar. Koordinatlar, kıyı yönleri ve habitat değerleri (kaya, kum, ışık, burun) `SPOTS` listesindedir ve yaklaşıktır.
 
 ## Yerelde çalıştırma
 

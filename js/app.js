@@ -1,380 +1,462 @@
-import { SPOTS, WINDOWS, buildDays, windName, fmt } from './engine.js';
+import { SPOTS, WINDOWS, SPECIES, PHASES, LEVELS, levelOf, buildDays, calibrate, windName, shelteredEdge, fmt } from './engine.js';
 
-const WX_POINT = { lat: 36.97, lon: 27.33 };      // Bağla–Karaincir arası kara noktası (rüzgâr, basınç)
-const SEA_POINT = { lat: 36.93, lon: 27.33 };     // Koyların hemen açığı (dalga, deniz suyu)
-const CACHE_KEY = 'bb-forecast-v1';
+const WX_POINT = { lat: 36.97, lon: 27.33 };   // Bağla–Karaincir arası kara noktası (rüzgâr, basınç, yağış)
+const SEA_POINT = { lat: 36.93, lon: 27.33 };  // koyların hemen açığı (dalga, deniz suyu, akıntı)
+const CACHE_KEY = 'bb-forecast-v2', LOG_KEY = 'bb-log-v1', SPOT_KEY = 'bb-spot';
 const TR_DAYS = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 const TR_DAYS_LONG = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
 const TR_MONTHS = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'];
+const MON_SHORT = ['O', 'Ş', 'M', 'N', 'M', 'H', 'T', 'A', 'E', 'E', 'K', 'A'];
+const PHASE_NAMES = { tan: 'Tan', sabah: 'Sabah', ogle: 'Öğle', ikindi: 'İkindi', batim: 'Gün batımı', gece: 'Gece' };
+const LVL_HEX = ['#ff6b5e', '#f59a4a', '#f2cc4b', '#4fd68e', '#2fe3c2'];
 
-const state = { days: [], sel: 0, tab: 'gun', insights: null, fetchedAt: null, map: null, mapLayer: null };
+const state = { all: [], base: [], days: [], sel: 0, tab: 'gun', spot: 'ilginlar', log: [], off: null, raw: null, fetchedAt: null, live: true, map: null, mapLayer: null };
 const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hex = s => LVL_HEX[levelOf(s)];
+const lvl = s => LEVELS[levelOf(s)];
+function isoToday() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function dParts(iso) { const d = new Date(iso + 'T12:00:00'); return { d, short: TR_DAYS[d.getDay()], long: TR_DAYS_LONG[d.getDay()], label: `${d.getDate()} ${TR_MONTHS[d.getMonth()]}` }; }
+function store(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function read(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? d; } catch (e) { return d; } }
 
 // ---------- veri ----------
 function urls() {
-  const common = `timezone=Europe%2FIstanbul&forecast_days=7&past_days=3`;
+  const c = 'timezone=Europe%2FIstanbul&forecast_days=7&past_days=31';
   return {
-    wx: `https://api.open-meteo.com/v1/forecast?latitude=${WX_POINT.lat}&longitude=${WX_POINT.lon}` +
-      `&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,pressure_msl,precipitation,cloud_cover,temperature_2m` +
-      `&daily=sunrise,sunset&wind_speed_unit=kn&${common}`,
-    marine: `https://marine-api.open-meteo.com/v1/marine?latitude=${SEA_POINT.lat}&longitude=${SEA_POINT.lon}` +
-      `&hourly=wave_height,wave_period,sea_surface_temperature&${common}`
+    wx: `https://api.open-meteo.com/v1/forecast?latitude=${WX_POINT.lat}&longitude=${WX_POINT.lon}&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,pressure_msl,precipitation,cloud_cover,temperature_2m&daily=sunrise,sunset&wind_speed_unit=kn&${c}`,
+    marine: `https://marine-api.open-meteo.com/v1/marine?latitude=${SEA_POINT.lat}&longitude=${SEA_POINT.lon}&hourly=wave_height,wave_direction,wave_period,sea_surface_temperature,ocean_current_velocity,sea_level_height_msl&${c}`
   };
 }
-
-async function getJSON(url, ms = 15000) {
-  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
-  try { const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' }); if (!r.ok) throw new Error(r.status); return await r.json(); }
-  finally { clearTimeout(t); }
+async function getJSON(url, ms = 20000) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), ms);
+  try { const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' }); if (!r.ok) throw new Error(r.status); return await r.json(); } finally { clearTimeout(t); }
 }
-
-async function load(force) {
-  $('#refresh').classList.add('spin');
-  setStatus('Tahmin yükleniyor…');
-  const u = urls();
-  let wx, marine, from = 'canlı';
+async function load() {
+  $('#refresh').classList.add('spin'); $('#status').textContent = 'Tahmin yükleniyor…';
+  const u = urls(); let wx, marine;
   try {
     [wx, marine] = await Promise.all([getJSON(u.wx), getJSON(u.marine).catch(() => null)]);
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ wx, marine, at: Date.now() })); } catch (e) {}
-    state.fetchedAt = new Date();
+    store(CACHE_KEY, { wx, marine, at: Date.now() }); state.fetchedAt = new Date(); state.live = true;
   } catch (e) {
-    let c = null; try { c = JSON.parse(localStorage.getItem(CACHE_KEY)); } catch (_) {}
-    if (!c) { setStatus('Tahmin alınamadı. İnternet bağlantını kontrol edip yenile.'); $('#refresh').classList.remove('spin'); renderError(); return; }
-    ({ wx, marine } = c); state.fetchedAt = new Date(c.at); from = 'kayıtlı';
+    const c = read(CACHE_KEY, null);
+    if (!c) { $('#status').textContent = 'Tahmin alınamadı'; $('#refresh').classList.remove('spin'); $('#day').innerHTML = `<div class="card"><h2>Tahmin alınamadı</h2><p class="muted mt">İnternete bağlanınca sağ üstteki yenile düğmesine bas.</p></div>`; return; }
+    ({ wx, marine } = c); state.fetchedAt = new Date(c.at); state.live = false;
   }
-  const today = isoToday();
-  state.days = buildDays(wx, marine).filter(d => d.date >= today);
-  if (!force) state.sel = 0;
-  state.insights = await getJSON('data/insights.json?ts=' + Date.now(), 8000).catch(() => state.insights);
+  state.raw = { wx, marine };
+  rebuild();
   const t = state.fetchedAt;
-  setStatus(`${from === 'canlı' ? 'Güncel' : 'Çevrimdışı, son kayıt'} · ${pad(t.getHours())}:${pad(t.getMinutes())} · Open-Meteo`);
+  $('#status').textContent = `${state.live ? 'Güncel' : 'Çevrimdışı · son kayıt'} · ${t.getDate()} ${TR_MONTHS[t.getMonth()]} ${pad(t.getHours())}:${pad(t.getMinutes())}${marine ? '' : ' · deniz verisi yok'}`;
   $('#refresh').classList.remove('spin');
+}
+function rebuild() {
+  if (!state.raw) return;
+  state.base = buildDays(state.raw.wx, state.raw.marine, null);
+  // defterdeki kayıtlara modelin (düzeltmesiz) o günkü puanını yaz
+  for (const tr of state.log) { const p = basePred(tr); if (p != null) tr.pred = p; }
+  store(LOG_KEY, state.log);
+  state.off = calibrate(state.log);
+  state.all = buildDays(state.raw.wx, state.raw.marine, state.off);
+  const today = isoToday();
+  state.days = state.all.filter(d => d.date >= today);
+  if (state.sel >= state.days.length) state.sel = 0;
   renderAll();
 }
+function basePred(tr) {
+  const d = state.base.find(x => x.date === tr.date); if (!d) return tr.pred ?? null;
+  const w = d.windows.find(x => x.id === tr.win); if (!w || w.score == null) return tr.pred ?? null;
+  return w.bySpot.find(b => b.spot.id === tr.spot)?.score ?? null;
+}
 
-// ---------- yardımcılar ----------
-const pad = n => String(n).padStart(2, '0');
-function isoToday() { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
-function dParts(iso) { const d = new Date(iso + 'T12:00:00'); return { d, short: TR_DAYS[d.getDay()], long: TR_DAYS_LONG[d.getDay()], label: `${d.getDate()} ${TR_MONTHS[d.getMonth()]}` }; }
-const col = s => s >= 6.5 ? 'var(--good)' : s >= 5 ? 'var(--mid)' : 'var(--bad)';
-const colHex = s => s >= 6.5 ? '#3fd08a' : s >= 5 ? '#f2b84b' : '#ff7a66';
-const badge = s => s >= 6.5 ? 'b-good' : s >= 5 ? 'b-mid' : 'b-bad';
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-function verdict(s) { return s >= 7.5 ? 'Çok iyi gün' : s >= 6.5 ? 'İyi gün' : s >= 5 ? 'Orta gün' : s >= 3.5 ? 'Zayıf gün' : 'Kötü gün'; }
-function setStatus(t) { $('#status').textContent = t; }
+// ---------- seçili noktaya göre görünüm ----------
+function winView(w) {
+  if (w.score == null) return null;
+  const b = state.spot === 'best' ? w.ranked[0] : w.bySpot.find(x => x.spot.id === state.spot);
+  return { id: w.id, name: w.name, from: w.from, to: w.to, hours: w.hours, ranked: w.ranked, ...b };
+}
+function dayView(d) {
+  const wins = d.windows.map(winView).filter(Boolean);
+  // bugün için saati geçmiş dilimleri önerme
+  if (d.date === isoToday()) { const n = new Date(), m = n.getHours() * 60 + n.getMinutes(); for (const w of wins) w.past = w.to !== '00:00' && toMin(w.to) <= m; }
+  const open = wins.filter(w => !w.past), pool = open.length ? open : wins;
+  const best = pool.reduce((a, b) => (b.score > a.score ? b : a));
+  return { wins, best };
+}
+const hourSel = h => state.spot === 'best' ? h.best : h.per.find(p => p.spot.id === state.spot);
+const spotLabel = () => state.spot === 'best' ? 'en iyi nokta' : SPOTS.find(s => s.id === state.spot).short;
+function confidence(i) { return i <= 1 ? 'yüksek' : i <= 3 ? 'orta' : 'düşük'; }
 
 // ---------- SVG parçaları ----------
-function gauge(score) {
-  const r = 62, c = 2 * Math.PI * r, arc = c * 0.75, val = arc * score / 10;
-  return `<svg class="gauge" viewBox="0 0 150 150" role="img" aria-label="Puan ${fmt(score)} / 10">
-    <defs><linearGradient id="gg" x1="0" x2="1"><stop offset="0" stop-color="#ff7a66"/><stop offset=".5" stop-color="#f2b84b"/><stop offset="1" stop-color="#3fd08a"/></linearGradient></defs>
-    <g transform="rotate(135 75 75)">
-      <circle cx="75" cy="75" r="${r}" fill="none" stroke="#1d4a5d" stroke-width="12" stroke-linecap="round" stroke-dasharray="${arc} ${c}"/>
-      <circle cx="75" cy="75" r="${r}" fill="none" stroke="url(#gg)" stroke-width="12" stroke-linecap="round" stroke-dasharray="${val} ${c}">
-        <animate attributeName="stroke-dasharray" from="0 ${c}" to="${val} ${c}" dur=".9s" fill="freeze"/></circle>
-    </g>
-    <text x="75" y="84" text-anchor="middle" class="val" fill="#e6f2f4">${fmt(score)}</text>
-    <text x="75" y="106" text-anchor="middle" font-size="12" fill="#8fb1bb" font-family="Source Sans 3, sans-serif">/ 10</text>
-  </svg>`;
+function gauge(score, label, size = 150, id = 'g') {
+  const r = size * 0.41, c = 2 * Math.PI * r, arc = c * 0.75, val = arc * score / 10, m = size / 2;
+  return `<svg class="gauge" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" role="img" aria-label="${label} ${fmt(score)} / 10">
+    <g transform="rotate(135 ${m} ${m})"><circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="#17404f" stroke-width="${size * 0.08}" stroke-linecap="round" stroke-dasharray="${arc} ${c}"/>
+    <circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="${hex(score)}" stroke-width="${size * 0.08}" stroke-linecap="round" stroke-dasharray="${val} ${c}"><animate attributeName="stroke-dasharray" from="0 ${c}" to="${val} ${c}" dur=".8s" fill="freeze"/></circle></g>
+    <text x="${m}" y="${m + size * 0.07}" text-anchor="middle" font-size="${size * 0.3}" font-weight="800" fill="#eaf6f8" font-family="Bricolage Grotesque, sans-serif">${fmt(score)}</text>
+    <text x="${m}" y="${m + size * 0.23}" text-anchor="middle" font-size="${size * 0.085}" font-weight="700" letter-spacing="1" fill="#8fb1bb" font-family="Source Sans 3, sans-serif">${label.toUpperCase()}</text></svg>`;
 }
-function ring(score) {
-  const r = 19, c = 2 * Math.PI * r;
-  return `<svg class="ring" viewBox="0 0 46 46" aria-hidden="true"><circle cx="23" cy="23" r="${r}" fill="none" stroke="#1d4a5d" stroke-width="5"/>
-    <circle cx="23" cy="23" r="${r}" fill="none" stroke="${colHex(score)}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${c * score / 10} ${c}" transform="rotate(-90 23 23)"/>
-    <text x="23" y="28" text-anchor="middle" font-size="13" font-weight="800" fill="#e6f2f4" font-family="Bricolage Grotesque, sans-serif">${fmt(score)}</text></svg>`;
-}
-function spark(hours) {
-  const hs = hours; if (hs.length < 2) return '';
-  const pts = hs.map((h, i) => `${(i / (hs.length - 1) * 76).toFixed(1)},${(21 - h.best.score / 10 * 20).toFixed(1)}`);
-  return `<svg class="spark" viewBox="0 0 76 22" aria-hidden="true"><polyline points="${pts.join(' ')}" fill="none" stroke="#3fb6d9" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+function ring(score, size = 44) {
+  const r = size * 0.4, c = 2 * Math.PI * r, m = size / 2;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="#17404f" stroke-width="${size * 0.11}"/>
+    <circle cx="${m}" cy="${m}" r="${r}" fill="none" stroke="${hex(score)}" stroke-width="${size * 0.11}" stroke-linecap="round" stroke-dasharray="${c * score / 10} ${c}" transform="rotate(-90 ${m} ${m})"/>
+    <text x="${m}" y="${m + size * 0.1}" text-anchor="middle" font-size="${size * 0.29}" font-weight="800" fill="#eaf6f8" font-family="Bricolage Grotesque, sans-serif">${fmt(score)}</text></svg>`;
 }
 function arrowSvg(deg, size = 16, color = 'currentColor') {
-  const r = (deg + 180) % 360; // gittiği yön
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" style="transform:rotate(${r}deg)"><path d="M12 3v15M12 21l-5.5-6.5M12 21l5.5-6.5" fill="none" stroke="${color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true" style="transform:rotate(${(deg + 180) % 360}deg)"><path d="M12 3v15M12 21l-5.5-6.5M12 21l5.5-6.5" fill="none" stroke="${color}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
-function compass(deg, kn) {
-  const r = (deg + 180) % 360;
-  const marks = ['K', 'D', 'G', 'B'].map((l, i) => { const a = i * 90 * Math.PI / 180; return `<text x="${27 + Math.sin(a) * 21}" y="${30 + -Math.cos(a) * 21}" text-anchor="middle" font-size="7" fill="#8fb1bb">${l}</text>`; }).join('');
-  return `<svg viewBox="0 0 54 54" aria-hidden="true"><circle cx="27" cy="27" r="25" fill="#061820" stroke="#1d4a5d"/>${marks}
-    <g transform="rotate(${r} 27 27)"><path d="M27 10v30M27 44l-6-8M27 44l6-8" stroke="#9fe3f2" stroke-width="3" stroke-linecap="round" fill="none"/></g></svg>`;
+function winIcon(id, size = 26) {
+  const s = 'stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"', a = `width="${size}" height="${size}" viewBox="0 0 32 32" aria-hidden="true"`;
+  if (id === 'sabah') return `<svg ${a} style="color:#f2b84b"><path d="M4 23h24M9 23a7 7 0 0 1 14 0" ${s}/><path d="M16 9v3M7 13l2.5 2.5M25 13l-2.5 2.5M16 4l-2.5 2.5M16 4l2.5 2.5" ${s}/></svg>`;
+  if (id === 'oglen') return `<svg ${a} style="color:#ffd76a"><circle cx="16" cy="16" r="6" ${s}/><path d="M16 3v4M16 25v4M3 16h4M25 16h4M7 7l2.8 2.8M22.2 22.2 25 25M7 25l2.8-2.8M22.2 9.8 25 7" ${s}/></svg>`;
+  if (id === 'aksam') return `<svg ${a} style="color:#ff9a6b"><path d="M4 23h24M9 23a7 7 0 0 1 14 0" ${s}/><path d="M16 4v3M7 13l2.5 2.5M25 13l-2.5 2.5M16 12l-2.5-2.5M16 12l2.5-2.5" ${s}/></svg>`;
+  return `<svg ${a} style="color:#b9c8ff"><path d="M21 5a11 11 0 1 0 6 18A9 9 0 0 1 21 5z" ${s}/></svg>`;
 }
-function moonSvg(illum, waxing) {
-  // aydınlık kısım: terminatör elips
-  const r = 22, k = 1 - 2 * illum;
-  const path = `M27 ${27 - r} A${r} ${r} 0 0 ${waxing ? 1 : 0} 27 ${27 + r} A${Math.abs(k * r)} ${r} 0 0 ${(k > 0) === waxing ? 0 : 1} 27 ${27 - r}`;
-  return `<svg viewBox="0 0 54 54" aria-hidden="true"><circle cx="27" cy="27" r="${r}" fill="#1a3340"/><path d="${path}" fill="#f3ead2"/></svg>`;
+function fishIcon(color) { return `<svg width="38" height="22" viewBox="0 0 40 24" aria-hidden="true"><path d="M3 12c6-8 18-9 26 0-8 9-20 8-26 0z" fill="${color}"/><path d="M29 12l8-6v12z" fill="${color}"/><circle cx="10" cy="10.5" r="1.6" fill="#04141b"/></svg>`; }
+function moonSvg(illum, waxing, size = 44) {
+  const r = size * 0.42, m = size / 2, k = 1 - 2 * illum;
+  const path = `M${m} ${m - r} A${r} ${r} 0 0 ${waxing ? 1 : 0} ${m} ${m + r} A${Math.abs(k * r)} ${r} 0 0 ${(k > 0) === waxing ? 0 : 1} ${m} ${m - r}`;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><circle cx="${m}" cy="${m}" r="${r}" fill="#1a3340"/><path d="${path}" fill="#f3ead2"/></svg>`;
 }
-function winIcon(id) {
-  const s = 'stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"';
-  if (id === 'sabah') return `<svg class="ico" viewBox="0 0 32 32" style="color:#f2b84b"><path d="M4 23h24M9 23a7 7 0 0 1 14 0" ${s}/><path d="M16 8v4M7 13l2.5 2.5M25 13l-2.5 2.5M16 4l-2 2M16 4l2 2" ${s}/><path d="M7 28h18" ${s} opacity=".5"/></svg>`;
-  if (id === 'oglen') return `<svg class="ico" viewBox="0 0 32 32" style="color:#ffd76a"><circle cx="16" cy="16" r="6" ${s}/><path d="M16 3v4M16 25v4M3 16h4M25 16h4M7 7l2.8 2.8M22.2 22.2 25 25M7 25l2.8-2.8M22.2 9.8 25 7" ${s}/></svg>`;
-  if (id === 'aksam') return `<svg class="ico" viewBox="0 0 32 32" style="color:#ff9a6b"><path d="M4 23h24M9 23a7 7 0 0 1 14 0" ${s}/><path d="M16 8v4M7 13l2.5 2.5M25 13l-2.5 2.5M16 12l-2-2M16 12l2-2" ${s}/><path d="M7 28h18" ${s} opacity=".5"/></svg>`;
-  return `<svg class="ico" viewBox="0 0 32 32" style="color:#b9c8ff"><path d="M21 5a11 11 0 1 0 6 18A9 9 0 0 1 21 5z" ${s}/><path d="M7 7h.01M11 4h.01M5 12h.01" ${s} stroke-width="3"/></svg>`;
-}
-function fishIcon(lvl) {
-  const c = lvl === 'hi' ? '#3fd08a' : lvl === 'md' ? '#f2b84b' : '#ff7a66';
-  return `<svg viewBox="0 0 40 24" aria-hidden="true"><path d="M3 12c6-8 18-9 26 0-8 9-20 8-26 0z" fill="${c}" opacity=".9"/><path d="M29 12l8-6v12z" fill="${c}"/><circle cx="10" cy="10.5" r="1.6" fill="#061820"/></svg>`;
+// Kıyı şeması: kara üstte, deniz altta; rüzgâr ve dalga okları noktanın yönüne göre
+function coastSvg(spot, windDir, waveDir) {
+  const rel = d => ((d - spot.facing + 180) % 360 + 360) % 360; // 0 = denizden karaya (aşağıdan yukarı)
+  const arrow = (d, col, x) => `<g transform="translate(${x} 62) rotate(${rel(d) + 180})"><path d="M0 -20v34M0 18l-7-9M0 18l7-9" fill="none" stroke="${col}" stroke-width="3.4" stroke-linecap="round"/></g>`;
+  return `<svg class="coast" viewBox="0 0 150 100" role="img" aria-label="Rüzgâr ve dalganın kıyıya göre yönü">
+    <rect width="150" height="100" rx="12" fill="#0a2a37"/><path d="M0 0h150v24c-22 9-40-4-62 5S40 22 0 30z" fill="#3a3a26"/>
+    <path d="M0 78q18-7 37 0t38 0 38 0 37 0" fill="none" stroke="#1f5d73" stroke-width="2"/>
+    <text x="8" y="14" font-size="8.5" fill="#cdbf95" font-family="Source Sans 3, sans-serif" font-weight="700">KARA</text>
+    <text x="8" y="94" font-size="8.5" fill="#6fb6cc" font-family="Source Sans 3, sans-serif" font-weight="700">DENİZ</text>
+    ${windDir != null ? arrow(windDir, '#9fe3f2', 52) : ''}${waveDir != null ? arrow(waveDir, '#f3ead2', 100) : ''}</svg>`;
 }
 
-// ---------- saatlik grafik ----------
-function hourlyChart(day) {
-  const hs = day.hours;
-  if (!hs.length) return '';
-  const W = 760, X0 = 34, X1 = W - 34, top = 18, sh = 130, wb = 176, wh = 70;
-  const n = hs.length, x = i => X0 + (i / (n - 1)) * (X1 - X0);
-  const yS = v => top + sh - (v / 10) * sh;
-  const maxKn = Math.max(20, ...hs.map(h => h.gust));
-  const yW = v => wb + wh - (v / maxKn) * wh;
-  const maxWave = Math.max(1.5, ...hs.map(h => h.wave ?? 0));
-  const yV = v => wb + wh - (v / maxWave) * wh;
-
-  // dilim bantları
-  let bands = '', prev = null, start = 0;
-  const bandCol = { sabah: '#f2b84b', oglen: '#ffd76a', aksam: '#ff9a6b', gece: '#7d8dff' };
-  const names = { sabah: 'SABAH', oglen: 'ÖĞLEN', aksam: 'AKŞAM', gece: 'GECE' };
-  hs.forEach((h, i) => {
-    if (h.win !== prev || i === n - 1) {
-      if (prev != null) {
-        const xa = x(start) - (start ? (x(1) - x(0)) / 2 : 0), xb = (i === n - 1 && h.win === prev) ? X1 : x(i) - (x(1) - x(0)) / 2;
-        bands += `<rect x="${xa}" y="${top}" width="${Math.max(0, xb - xa)}" height="${sh}" fill="${bandCol[prev]}" opacity=".07"/>` +
-          `<text x="${(xa + xb) / 2}" y="${top + 12}" text-anchor="middle" font-size="9.5" letter-spacing="1" fill="${bandCol[prev]}" font-weight="700" font-family="Source Sans 3, sans-serif">${names[prev]}</text>`;
-      }
-      prev = h.win; start = i;
-    }
-  });
-
-  const line = hs.map((h, i) => `${x(i).toFixed(1)},${yS(h.best.score).toFixed(1)}`).join(' ');
-  const area = `${X0},${top + sh} ${line} ${X1},${top + sh}`;
-  const grid = [2.5, 5, 7.5, 10].map(v => `<line x1="${X0}" x2="${X1}" y1="${yS(v)}" y2="${yS(v)}" stroke="#1d4a5d" stroke-dasharray="2 4"/><text x="${X0 - 6}" y="${yS(v) + 3}" text-anchor="end" font-size="9" fill="#8fb1bb">${v}</text>`).join('');
-  const bars = hs.map((h, i) => {
-    const bw = Math.max(4, (X1 - X0) / n * 0.55);
-    return `<rect x="${x(i) - bw / 2}" y="${yW(h.gust)}" width="${bw}" height="${wb + wh - yW(h.gust)}" fill="#3fb6d9" opacity=".22" rx="2"/>` +
-      `<rect x="${x(i) - bw / 2}" y="${yW(h.wind)}" width="${bw}" height="${wb + wh - yW(h.wind)}" fill="#3fb6d9" opacity=".75" rx="2"/>`;
+// Gün şeridi: gök renkleri üstünde dört dilim ve puanları
+function dayRibbon(d, v) {
+  const W = 440, H = 84, t0 = d.sun.riseMin - 60, t1 = 24 * 60, x = m => 10 + (m - t0) / (t1 - t0) * (W - 20);
+  const stops = [[t0, '#0b1d3a'], [d.sun.riseMin, '#f29b5a'], [d.sun.riseMin + 90, '#6fc3e8'], [d.sun.setMin - 90, '#6fc3e8'], [d.sun.setMin, '#f2854b'], [d.sun.setMin + 60, '#1a2a5a'], [t1, '#081428']];
+  const grad = stops.map(([m, c]) => `<stop offset="${((m - t0) / (t1 - t0) * 100).toFixed(1)}%" stop-color="${c}"/>`).join('');
+  const segs = v.wins.map(w => {
+    const a = toMin(w.from), b = w.to === '00:00' ? t1 : toMin(w.to), xa = x(a), xb = x(b);
+    return `<rect x="${xa + 1.5}" y="40" width="${xb - xa - 3}" height="38" rx="9" fill="${hex(w.score)}" opacity="${w.past ? 0.25 : w.id === v.best.id ? 1 : 0.6}"/>
+      <text x="${(xa + xb) / 2}" y="57" text-anchor="middle" font-size="11" font-weight="700" fill="#04141b" font-family="Source Sans 3, sans-serif">${w.name}</text>
+      <text x="${(xa + xb) / 2}" y="73" text-anchor="middle" font-size="15" font-weight="800" fill="#04141b" font-family="Bricolage Grotesque, sans-serif">${fmt(w.score)}</text>`;
   }).join('');
-  const arrows = hs.map((h, i) => i % 2 ? '' : `<g transform="translate(${x(i)} ${wb - 12}) rotate(${(h.dir + 180) % 360})"><path d="M0 -6v12M0 7l-3.5-4M0 7l3.5-4" stroke="#9fe3f2" stroke-width="1.6" fill="none" stroke-linecap="round"/></g>`).join('');
-  const wave = hs.some(h => h.wave != null) ? `<polyline points="${hs.map((h, i) => h.wave == null ? '' : `${x(i).toFixed(1)},${yV(h.wave).toFixed(1)}`).filter(Boolean).join(' ')}" fill="none" stroke="#f3ead2" stroke-width="2" stroke-dasharray="5 3"/>` : '';
-  const labels = hs.map((h, i) => (h.min % 120 === 0) ? `<text x="${x(i)}" y="${wb + wh + 16}" text-anchor="middle" font-size="10" fill="#8fb1bb" font-family="JetBrains Mono, monospace">${h.t.slice(11, 13)}</text>` : '').join('');
-  const dots = hs.map((h, i) => (i % 3 === 0) ? `<circle cx="${x(i)}" cy="${yS(h.best.score)}" r="2.6" fill="${colHex(h.best.score)}"/>` : '').join('');
-
   let now = '';
-  if (day.date === isoToday()) {
-    const d = new Date(), m = d.getHours() * 60 + d.getMinutes();
-    const fi = (m - hs[0].min) / 60;
-    if (fi >= 0 && fi <= n - 1) { const xn = X0 + fi / (n - 1) * (X1 - X0); now = `<line x1="${xn}" x2="${xn}" y1="${top}" y2="${wb + wh}" stroke="#e6f2f4" stroke-width="1.2" opacity=".7"/><text x="${xn}" y="${top - 5}" text-anchor="middle" font-size="9.5" fill="#e6f2f4" font-weight="700">ŞİMDİ</text>`; }
-  }
-  const bh = day.bestHour, bi = hs.indexOf(bh);
-  const star = bi >= 0 ? `<circle cx="${x(bi)}" cy="${yS(bh.best.score)}" r="7" fill="none" stroke="#3fd08a" stroke-width="2.4"><animate attributeName="r" values="6;9;6" dur="2.2s" repeatCount="indefinite"/></circle>` : '';
+  if (d.date === isoToday()) { const n = new Date(), m = n.getHours() * 60 + n.getMinutes(); if (m > t0 && m < t1) now = `<line x1="${x(m)}" x2="${x(m)}" y1="6" y2="80" stroke="#fff" stroke-width="2"/><circle cx="${x(m)}" cy="6" r="4" fill="#fff"/>`; }
+  const tick = (m, l) => `<text x="${x(m)}"  y="28" text-anchor="middle" font-size="11" font-weight="700" fill="#04141b" font-family="JetBrains Mono, monospace">${l}</text>`;
+  return `<svg class="ribbon" viewBox="0 0 ${W} ${H}" role="img" aria-label="Gün içi dilimler ve puanları">
+    <defs><linearGradient id="sky${d.date}" x1="0" x2="1">${grad}</linearGradient></defs>
+    <rect x="10" y="12" width="${W - 20}" height="24" rx="8" fill="url(#sky${d.date})"/>
+    ${tick(d.sun.riseMin + 75, d.sun.rise)}${tick(d.sun.setMin - 75, d.sun.set)}${segs}${now}</svg>`;
+}
+const toMin = t => +t.slice(0, 2) * 60 + +t.slice(3, 5);
 
-  return `<svg class="chart" viewBox="0 0 ${W} ${wb + wh + 24}" role="img" aria-label="Saatlik balık puanı, rüzgâr ve dalga">
-    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3fd08a" stop-opacity=".55"/><stop offset=".55" stop-color="#3fb6d9" stop-opacity=".25"/><stop offset="1" stop-color="#3fb6d9" stop-opacity="0"/></linearGradient></defs>
-    ${bands}${grid}<polygon points="${area}" fill="url(#ag)"/><polyline points="${line}" fill="none" stroke="#9fe3f2" stroke-width="2.4" stroke-linejoin="round"/>${dots}${star}
-    <text x="${X0}" y="${wb - 22}" font-size="9.5" fill="#8fb1bb" font-weight="700" letter-spacing="1">RÜZGÂR (kn) · DALGA (m)</text>
-    <line x1="${X0}" x2="${X1}" y1="${wb + wh}" y2="${wb + wh}" stroke="#1d4a5d"/>${bars}${arrows}${wave}
-    <text x="${X1 + 4}" y="${yW(maxKn) + 3}" font-size="9" fill="#3fb6d9">${Math.round(maxKn)}</text>
-    <text x="${X1 + 4}" y="${yV(maxWave) + 12}" font-size="9" fill="#f3ead2">${fmt(maxWave)}m</text>
-    ${labels}${now}</svg>`;
+// Tür saatleri: satır tür, sütun saat, koyuluk aktiflik
+function speciesGrid(d) {
+  const hs = d.hours; if (!hs.length) return '';
+  const rows = SPECIES.map(sp => ({ sp, vals: hs.map(h => hourSel(h).species.find(x => x.sp.id === sp.id).a) }))
+    .map(r => ({ ...r, max: Math.max(...r.vals) })).filter(r => r.max >= 0.08).sort((a, b) => b.max - a.max).slice(0, 8);
+  const L = 118, cw = 30, rh = 26, W = L + hs.length * cw + 6, H = 22 + rows.length * rh + 4;
+  const head = hs.map((h, i) => h.min % 120 === 0 ? `<text x="${L + i * cw + cw / 2}" y="14" text-anchor="middle" font-size="10" fill="#8fb1bb" font-family="JetBrains Mono, monospace">${h.t.slice(11, 13)}</text>` : '').join('');
+  const body = rows.map((r, j) => `<text x="${L - 8}" y="${22 + j * rh + 17}" text-anchor="end" font-size="12" fill="#eaf6f8" font-family="Source Sans 3, sans-serif" font-weight="600">${esc(r.sp.name.split(',')[0].split(' (')[0])}</text>` +
+    r.vals.map((a, i) => `<rect x="${L + i * cw + 1.5}" y="${22 + j * rh + 2}" width="${cw - 3}" height="${rh - 4}" rx="5" fill="${a >= 0.3 ? '#2fe3c2' : a >= 0.18 ? '#4fd68e' : a >= 0.1 ? '#f2cc4b' : '#17404f'}" opacity="${a < 0.1 ? 0.6 : Math.min(1, 0.45 + a * 1.4)}"/>`).join('')).join('');
+  const sun = [['riseMin', '#f2b84b'], ['setMin', '#ff9a6b']].map(([k, c]) => { const fi = (d.sun[k] - hs[0].min) / 60; return fi >= 0 && fi <= hs.length ? `<line x1="${L + fi * cw}" x2="${L + fi * cw}" y1="18" y2="${H}" stroke="${c}" stroke-width="1.5" stroke-dasharray="3 3"/>` : ''; }).join('');
+  return `<div class="chart-wrap"><svg class="chart" style="min-width:${W}px" viewBox="0 0 ${W} ${H}" role="img" aria-label="Türlerin saatlere göre aktifliği">${head}${body}${sun}</svg></div>
+    <div class="legend"><span><i class="sq" style="background:#2fe3c2"></i>en aktif</span><span><i class="sq" style="background:#4fd68e"></i>aktif</span><span><i class="sq" style="background:#f2cc4b"></i>az</span><span><i class="sq" style="background:#17404f"></i>beklenmez</span><span>Kesik çizgiler gün doğumu ve batımı</span></div>`;
+}
+
+// Saat saat: şans (dolgu), koşul (kesik çizgi), rüzgâr sütunları ve dalga
+function hourlyChart(d) {
+  const hs = d.hours; if (hs.length < 2) return '';
+  const W = 760, X0 = 34, X1 = W - 34, top = 14, sh = 120, wb = 168, wh = 66, n = hs.length, x = i => X0 + (i / (n - 1)) * (X1 - X0);
+  const yS = v => top + sh - (v / 10) * sh, maxKn = Math.max(20, ...hs.map(h => h.gust)), yW = v => wb + wh - (v / maxKn) * wh;
+  const maxWv = Math.max(1.5, ...hs.map(h => h.wave ?? 0)), yV = v => wb + wh - (v / maxWv) * wh;
+  const ch = hs.map((h, i) => `${x(i).toFixed(1)},${yS(hourSel(h).chance).toFixed(1)}`).join(' ');
+  const cd = hs.map((h, i) => `${x(i).toFixed(1)},${yS(hourSel(h).cond).toFixed(1)}`).join(' ');
+  const grid = [2.5, 5, 7.5, 10].map(v => `<line x1="${X0}" x2="${X1}" y1="${yS(v)}" y2="${yS(v)}" stroke="#17404f" stroke-dasharray="2 4"/><text x="${X0 - 6}" y="${yS(v) + 3}" text-anchor="end" font-size="9" fill="#8fb1bb">${v}</text>`).join('');
+  const bw = Math.max(4, (X1 - X0) / n * 0.55);
+  const bars = hs.map((h, i) => `<rect x="${x(i) - bw / 2}" y="${yW(h.gust)}" width="${bw}" height="${wb + wh - yW(h.gust)}" fill="#3fb6d9" opacity=".22" rx="2"/><rect x="${x(i) - bw / 2}" y="${yW(h.wind)}" width="${bw}" height="${wb + wh - yW(h.wind)}" fill="#3fb6d9" opacity=".8" rx="2"/>`).join('');
+  const arrows = hs.map((h, i) => i % 2 ? '' : `<g transform="translate(${x(i)} ${wb - 10}) rotate(${(h.dir + 180) % 360})"><path d="M0 -6v12M0 7l-3.5-4M0 7l3.5-4" stroke="#9fe3f2" stroke-width="1.6" fill="none" stroke-linecap="round"/></g>`).join('');
+  const wave = hs.some(h => h.wave != null) ? `<polyline points="${hs.map((h, i) => h.wave == null ? '' : `${x(i).toFixed(1)},${yV(h.wave).toFixed(1)}`).filter(Boolean).join(' ')}" fill="none" stroke="#f3ead2" stroke-width="2" stroke-dasharray="5 3"/>` : '';
+  const labels = hs.map((h, i) => h.min % 120 === 0 ? `<text x="${x(i)}" y="${wb + wh + 15}" text-anchor="middle" font-size="10" fill="#8fb1bb" font-family="JetBrains Mono, monospace">${h.t.slice(11, 13)}</text>` : '').join('');
+  let now = '';
+  if (d.date === isoToday()) { const t = new Date(), fi = (t.getHours() * 60 + t.getMinutes() - hs[0].min) / 60; if (fi >= 0 && fi <= n - 1) { const xn = X0 + fi / (n - 1) * (X1 - X0); now = `<line x1="${xn}" x2="${xn}" y1="${top}" y2="${wb + wh}" stroke="#fff" stroke-width="1.3" opacity=".8"/>`; } }
+  return `<div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${wb + wh + 22}" role="img" aria-label="Saatlik şans, koşul, rüzgâr ve dalga">
+    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2fe3c2" stop-opacity=".5"/><stop offset="1" stop-color="#2fe3c2" stop-opacity="0"/></linearGradient></defs>
+    ${grid}<polygon points="${X0},${top + sh} ${ch} ${X1},${top + sh}" fill="url(#ag)"/><polyline points="${ch}" fill="none" stroke="#2fe3c2" stroke-width="2.6" stroke-linejoin="round"/>
+    <polyline points="${cd}" fill="none" stroke="#b9c8ff" stroke-width="1.6" stroke-dasharray="4 4"/>
+    <line x1="${X0}" x2="${X1}" y1="${wb + wh}" y2="${wb + wh}" stroke="#17404f"/>${bars}${arrows}${wave}
+    <text x="${X1 + 4}" y="${yW(maxKn) + 3}" font-size="9" fill="#3fb6d9">${Math.round(maxKn)}kn</text><text x="${X1 + 4}" y="${yW(maxKn) + 14}" font-size="9" fill="#f3ead2">${fmt(maxWv)}m</text>${labels}${now}</svg></div>
+    <div class="legend"><span><i style="background:#2fe3c2"></i>Av şansı</span><span><i style="background:#b9c8ff"></i>Koşul</span><span><i style="background:#3fb6d9"></i>Rüzgâr (soluk: hamle)</span><span><i style="background:#f3ead2"></i>Dalga</span></div>`;
 }
 
 // ---------- render ----------
-function renderAll() { renderStrip(); renderDay(); if (state.tab === 'hafta') renderWeek(); if (state.tab === 'harita') renderMap(); if (state.tab === 'defter') renderDefter(); }
+function renderAll() { renderSpotbar(); renderStrip(); renderDay(); if (state.tab === 'hafta') renderWeek(); if (state.tab === 'turler') renderSpecies(); if (state.tab === 'harita') renderMap(); if (state.tab === 'defter') renderDefter(); }
 
-function renderError() {
-  $('#day').innerHTML = `<div class="card"><h2>Tahmin alınamadı</h2><p class="muted" style="margin-top:6px">Uygulama hava ve deniz tahminini Open-Meteo'dan çekiyor. İnternete bağlanınca sağ üstteki yenile düğmesine bas.</p></div>`;
+function renderSpotbar() {
+  const opts = [...SPOTS.map(s => [s.id, s.short]), ['best', 'En iyisi']];
+  $('#spotbar').innerHTML = opts.map(([id, n]) => `<button type="button" class="pillbtn" aria-pressed="${state.spot === id}" data-s="${id}">${esc(n)}</button>`).join('');
+  $('#spotbar').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { state.spot = b.dataset.s; store(SPOT_KEY, state.spot); renderAll(); }));
 }
 
 function renderStrip() {
-  const best = state.days.reduce((a, d, i) => d.score > state.days[a].score ? i : a, 0);
+  const vs = state.days.map(dayView), best = vs.reduce((a, v, i) => v.best.score > vs[a].best.score ? i : a, 0);
   $('#strip').innerHTML = state.days.map((d, i) => {
-    const p = dParts(d.date);
-    return `<button class="dchip" role="tab" type="button" aria-selected="${i === state.sel}" data-i="${i}">
-      ${i === best ? '<span class="crown">EN İYİ</span>' : ''}
-      <span class="d1">${i === 0 ? 'Bugün' : p.short}</span><span class="d2">${p.label}</span>
-      ${ring(d.score)}${spark(d.hours)}
-      <span class="d2" style="display:flex;gap:4px;align-items:center">${arrowSvg(d.summary.dirMorning ?? 0, 13)}${Math.round(d.summary.windMax)} kn</span>
-    </button>`;
+    const p = dParts(d.date), v = vs[i];
+    const bars = v.wins.map(w => `<i style="height:${6 + w.score * 2.2}px;background:${hex(w.score)}"></i>`).join('');
+    return `<button class="dchip" role="tab" type="button" aria-selected="${i === state.sel}" data-i="${i}">${i === best ? '<span class="crown">EN İYİ</span>' : ''}
+      <span class="d1">${i === 0 ? 'Bugün' : p.short}</span><span class="d2">${p.label}</span>${ring(v.best.score)}
+      <span class="minibars" aria-hidden="true">${bars}</span><span class="d2">${esc(v.best.name)}</span></button>`;
   }).join('');
   $('#strip').querySelectorAll('.dchip').forEach(b => b.addEventListener('click', () => { state.sel = +b.dataset.i; renderStrip(); renderDay(); if (state.map) renderMap(); }));
 }
 
 function renderDay() {
   const d = state.days[state.sel]; if (!d) return;
-  const p = dParts(d.date), s = d.summary, ins = state.insights?.days?.[d.date];
-  const wins = d.windows.filter(w => w.score != null);
-  const sortedW = [...wins].sort((a, b) => b.score - a.score);
-  const bw = d.bestWin, second = sortedW[1];
-  const topReasons = [...new Set(bw.top.best.reasons)].slice(0, 3).join(', ');
-  const compare = second ? `${bw.name} ${fmt(bw.score)} ile en iyi dilim${second.score < bw.score ? `, ${second.name.toLowerCase()}tan ${fmt(bw.score - second.score)} puan önde` : `, ${second.name.toLowerCase()} ile başa baş`}.` : '';
-  const bestSpot = d.spots[0];
-  const dirM = s.dirMorning, dirE = s.dirEvening;
-  const dirTxt = dirM == null ? '' : (windName(dirM) === windName(dirE ?? dirM) ? windName(dirM) : `${windName(dirM)} → ${windName(dirE)}`);
-  const pTrend = s.pStart && s.pEnd ? (s.pEnd - s.pStart) : 0;
-  const alerts = [...(ins?.alert ? [ins.alert] : []), ...d.safety];
+  const p = dParts(d.date), s = d.summary, v = dayView(d), bw = v.best, alt = bw.ranked[0];
+  const dirTxt = s.dirMorning == null ? '' : (windName(s.dirMorning) === windName(s.dirEvening ?? s.dirMorning) ? windName(s.dirMorning) : `${windName(s.dirMorning)} → ${windName(s.dirEvening)}`);
+  const top = bw.species.filter(x => x.a >= 0.08).slice(0, 4);
+  const better = state.spot !== 'best' && alt.spot.id !== bw.spot.id && alt.score - bw.score >= 1;
+  const verdictTxt = levelOf(bw.score) >= 3 ? 'Gitmeye değer' : levelOf(bw.score) === 2 ? 'Şansın orta' : levelOf(bw.score) === 1 ? 'Şans düşük' : 'Bugün gitme';
+  const offNote = state.off && state.off.n ? `Defterindeki ${state.off.n} av ile ${state.off.global > 0 ? '+' : ''}${fmt(state.off.global)} puan düzeltildi.` : 'Henüz av kaydın yok; puanlar genel kurallara dayanıyor.';
 
   $('#day').innerHTML = `
   <section class="card hero">
-    ${gauge(d.score)}
-    <div>
-      <span class="eyebrow">${state.sel === 0 ? 'Bugün · ' : ''}${p.label} ${p.long}</span>
-      <p class="verdict">${verdict(d.score)}</p>
-      <p class="muted" style="margin-top:4px">${esc(compare)} En iyi saat <b class="num">${d.bestHour.t.slice(11, 16)}</b>, ${esc(bestSpot.spot.short)}${bestSpot.edge && bestSpot.edge !== 'tüm koy' ? ' ' + esc(bestSpot.edge) : ''}.</p>
-      <div class="chips">
-        <span class="chip good">${winIcon(bw.id).replace('class="ico"', 'width="18" height="18"')} En iyi: <b>${bw.name}</b></span>
-        <span class="chip">${arrowSvg(dirM ?? 0, 14)} <b>${Math.round(s.windMin)}–${Math.round(s.windMax)} kn</b> ${esc(dirTxt)}</span>
-        <span class="chip">Dalga <b>${s.waveMax == null ? '–' : fmt(s.waveMax) + ' m'}</b></span>
+    <div class="hero-top">
+      ${gauge(bw.score, 'av şansı', 150)}
+      <div class="hero-txt">
+        <span class="eyebrow">${state.sel === 0 ? 'Bugün · ' : ''}${p.label} ${p.long} · ${esc(bw.spot.name)}</span>
+        <p class="verdict" style="color:${hex(bw.score)}">${verdictTxt}</p>
+        <p class="lead">En iyi dilim <b>${bw.name.toLowerCase()}</b> (${bw.from}–${bw.to}), en iyi saat <b class="num">${bw.topHour}</b>. Av şansı <b>${lvl(bw.score).toLowerCase()}</b>, atış koşulu <b class="num">${fmt(bw.cond)}</b>/10.</p>
+        ${top.length ? `<p class="muted sm">En olası: ${top.map(x => esc(x.sp.name.split(',')[0])).join(', ')}.</p>` : ''}
       </div>
-      ${ins?.note ? `<p class="note"><b>Claude'un notu:</b> ${esc(ins.note)}</p>` : ''}
     </div>
+    ${dayRibbon(d, v)}
+    <div class="chips">
+      <span class="chip">${arrowSvg(s.dirMorning ?? 0, 14)} <b>${Math.round(s.windMin)}–${Math.round(s.windMax)} kn</b> ${esc(dirTxt)}</span>
+      <span class="chip">Dalga <b>${s.waveMax == null ? '–' : fmt(s.waveMax) + ' m'}</b></span>
+      <span class="chip">Su <b>${s.sst == null ? '–' : fmt(s.sst) + '°'}</b></span>
+      <span class="chip">Tahmin güveni <b>${confidence(state.sel)}</b></span>
+    </div>
+    ${better ? `<p class="note"><b>${esc(alt.spot.name)}</b> aynı dilimde <b>${fmt(alt.score)}</b> (${lvl(alt.score).toLowerCase()}). ${esc(alt.spot.tip)}</p>` : ''}
   </section>
-  ${alerts.length ? `<div class="alert"><strong>Güvenlik</strong>${alerts.map(a => `<span>${esc(a)}</span>`).join('')}</div>` : ''}
+  ${d.safety.length ? `<div class="alert"><strong>Güvenlik</strong>${d.safety.map(a => `<span>${esc(a)}</span>`).join('')}</div>` : ''}
 
   <section class="card">
-    <div class="section-h"><h2>Sabah mı, öğlen mi, akşam mı, gece mi?</h2></div>
-    <div class="wins">${WINDOWS.map(w => {
-      const x = d.windows.find(v => v.id === w.id);
-      if (!x || x.score == null) return `<div class="win">${winIcon(w.id)}<span class="eyebrow">${w.name}</span><span class="muted">Veri yok</span></div>`;
-      const why = [...new Set(x.top.best.reasons)].slice(0, 2).join(', ');
-      return `<div class="win ${x.id === bw.id ? 'best' : ''}">${x.id === bw.id ? '<span class="tag">EN İYİ</span>' : ''}
-        ${winIcon(w.id)}<span class="eyebrow">${w.name}</span>
-        <span class="sc" style="color:${col(x.score)}">${fmt(x.score)}</span>
-        <div class="meter"><i style="width:${x.score * 10}%;background:${col(x.score)}"></i></div>
-        <span class="rng">${x.from}–${x.to} · en iyi ${x.top.t.slice(11, 16)}</span>
-        <span class="why">${esc(why)}</span></div>`;
+    <div class="section-h"><h2>Hangi dilim?</h2><span class="eyebrow">${esc(spotLabel())}</span></div>
+    <div class="wins">${v.wins.map(w => {
+      const sp = w.species[0];
+      return `<div class="win ${w.id === bw.id ? 'best' : ''} ${w.past ? 'past' : ''}">${w.id === bw.id ? '<span class="tag">EN İYİ</span>' : w.past ? '<span class="tag gone">GEÇTİ</span>' : ''}
+        <div class="win-h">${winIcon(w.id)}<span class="eyebrow">${w.name}</span></div>
+        <span class="sc" style="color:${hex(w.score)}">${fmt(w.score)}</span><span class="lv" style="color:${hex(w.score)}">${lvl(w.score)}</span>
+        <span class="rng">${w.from}–${w.to}</span>
+        <div class="meter" title="Atış koşulu"><i style="width:${w.cond * 10}%"></i></div><span class="why">Koşul ${fmt(w.cond)}${w.condWhy[0] ? ' · ' + esc(w.condWhy[0]) : ''}</span>
+        <span class="why">${sp && sp.a >= 0.08 ? '→ ' + esc(sp.sp.name.split(',')[0]) : 'Belirgin hedef yok'}</span></div>`;
     }).join('')}</div>
-    <p class="muted" style="margin-top:10px;font-size:.88rem">${esc(bw.name)} neden önde: ${esc(topReasons)}.</p>
   </section>
 
   <section class="card">
-    <div class="section-h"><h2>Saat saat</h2><span class="eyebrow">en iyi noktaya göre</span></div>
-    <div class="chart-wrap">${hourlyChart(d)}</div>
-    <div class="legend"><span><i style="background:#9fe3f2"></i>Balık puanı</span><span><i style="background:#3fb6d9"></i>Rüzgâr (açık renk: hamle)</span><span><i style="background:#f3ead2"></i>Dalga</span><span>Oklar rüzgârın gittiği yönü gösterir</span></div>
+    <div class="section-h"><h2>Ne tutulur, nasıl?</h2><span class="eyebrow">${bw.name} · ${esc(bw.spot.short)}</span></div>
+    <div class="targets">${top.length ? top.map(x => `
+      <div class="target">${fishIcon(x.a >= 0.3 ? LVL_HEX[4] : x.a >= 0.18 ? LVL_HEX[3] : LVL_HEX[2])}
+        <div><b>${esc(x.sp.name)}</b><div class="lure">${esc(x.sp.lure)}</div><div class="how">${esc(x.sp.how)}</div>
+        ${x.why.length ? `<div class="tags">${[...new Set(x.why)].map(y => `<span>${esc(y)}</span>`).join('')}</div>` : ''}</div>
+        <span class="badge" style="background:${x.a >= 0.3 ? LVL_HEX[4] : x.a >= 0.18 ? LVL_HEX[3] : LVL_HEX[2]}">${x.a >= 0.3 ? 'EN OLASI' : x.a >= 0.18 ? 'OLASI' : 'AZ'}</span></div>`).join('') : '<p class="muted">Bu dilimde sahteye gelmesi beklenen belirgin bir tür yok.</p>'}</div>
   </section>
 
   <section class="card">
-    <div class="section-h"><h2>Noktalar</h2><span class="eyebrow">sabah + akşam ortalaması</span></div>
-    <div class="spots">${d.spots.map(x => `
-      <div class="spot ${x.spot.main ? 'main' : ''}">${ring(x.score)}
-        <div><h3>${esc(x.spot.name)}</h3>
-          <span class="badge ${x.sheltered ? 'b-good' : x.exposed ? 'b-bad' : 'b-mid'}">${x.sheltered ? 'KUYTU' : x.exposed ? 'RÜZGÂRA AÇIK' : 'YANDAN RÜZGÂR'}</span>
-          <p>${x.edge ? 'Kuytu kenar: ' + esc(x.edge) + '. ' : ''}Kıyıda dalga ~${fmt(x.maxWave)} m.</p></div></div>`).join('')}</div>
+    <div class="section-h"><h2>Tür saatleri</h2><span class="eyebrow">${esc(spotLabel())}</span></div>
+    ${speciesGrid(d)}
+  </section>
+
+  <section class="card">
+    <div class="section-h"><h2>Saat saat</h2><span class="eyebrow">${esc(spotLabel())}</span></div>
+    ${hourlyChart(d)}
+  </section>
+
+  <section class="card">
+    <div class="section-h"><h2>Noktalar</h2><span class="eyebrow">dilimlere göre av şansı</span></div>
+    <div class="tbl"><table class="matrix"><thead><tr><th>Nokta</th>${v.wins.map(w => `<th>${w.name}</th>`).join('')}</tr></thead><tbody>
+      ${SPOTS.map(sp => `<tr><td><b>${esc(sp.short)}</b></td>${v.wins.map(w => { const b = d.windows.find(x => x.id === w.id).bySpot.find(x => x.spot.id === sp.id); return `<td><span class="cellsc" style="background:${hex(b.score)}">${fmt(b.score)}</span></td>`; }).join('')}</tr>`).join('')}
+    </tbody></table></div>
+    <div class="spotinfo">${coastSvg(bw.spot, bw.id === 'sabah' ? s.dirMorning : s.dirEvening, s.waveDir)}
+      <div><b>${esc(bw.spot.name)}</b><p class="sm muted">${bw.on < -0.35 ? 'Rüzgâr karadan: atış uzun, deniz düz.' : bw.on > 0.35 ? 'Rüzgâr denizden: karşıdan atış, kıyıda hareket var.' : 'Rüzgâr yandan.'} Kıyıda dalga ~${fmt(bw.wave ?? 0)} m.${shelteredEdge(bw.spot, s.dirMorning) ? ' Kuytu kenar: ' + esc(shelteredEdge(bw.spot, s.dirMorning)) + '.' : ''}</p>
+      <p class="sm">${esc(bw.spot.tip)}</p><div class="legend"><span><i style="background:#9fe3f2"></i>Rüzgâr</span><span><i style="background:#f3ead2"></i>Dalga</span></div></div></div>
   </section>
 
   <section class="card">
     <div class="section-h"><h2>Deniz ve hava</h2></div>
     <div class="conds">
-      <div class="cond"><span class="eyebrow">Rüzgâr</span><div class="compass-row">${compass(dirM ?? 0)}<div><span class="v">${Math.round(s.windMin)}–${Math.round(s.windMax)} kn</span><br><small>${esc(dirTxt)} · hamle ${Math.round(s.gustMax)}</small></div></div></div>
-      <div class="cond"><span class="eyebrow">Dalga (açık)</span><span class="v">${s.waveMax == null ? 'veri yok' : fmt(s.waveMax) + ' m'}</span><small>${s.period ? 'periyot ' + fmt(s.period) + ' sn' : ''}</small></div>
-      <div class="cond"><span class="eyebrow">Basınç</span><span class="v">${s.pStart ? Math.round(s.pStart) + ' → ' + Math.round(s.pEnd) : '–'} <span style="color:${pTrend < -1 ? 'var(--good)' : pTrend > 2 ? 'var(--bad)' : 'var(--muted)'}">${pTrend < -1 ? '↓' : pTrend > 1 ? '↑' : '→'}</span></span><small>hPa, 09:00 → 21:00</small></div>
-      <div class="cond"><span class="eyebrow">Yağış / bulut</span><span class="v">${fmt(s.rain)} mm</span><small>bulut %${Math.round(s.cloud)} · son 48 saat ${fmt(s.rain48)} mm</small></div>
-      <div class="cond"><span class="eyebrow">Hava / su</span><span class="v">${Math.round(s.tMin)}–${Math.round(s.tMax)}° / ${s.sst == null ? '–' : fmt(s.sst) + '°'}</span><small>°C</small></div>
-      <div class="cond"><span class="eyebrow">Ay</span><div class="compass-row">${moonSvg(d.moon.illum, d.moon.waxing)}<div><span class="v">%${Math.round(d.moon.illum * 100)}</span><br><small>${d.moon.waxing ? 'büyüyen' : 'küçülen'}</small></div></div></div>
-      <div class="cond"><span class="eyebrow">Gün doğumu / batımı</span><span class="v">${d.sun.rise} / ${d.sun.set}</span><small>Bodrum</small></div>
+      <div class="cond"><span class="eyebrow">Rüzgâr</span><span class="v">${Math.round(s.windMin)}–${Math.round(s.windMax)} kn</span><small>${esc(dirTxt)} · hamle ${Math.round(s.gustMax)}</small></div>
+      <div class="cond"><span class="eyebrow">Dalga (açık)</span><span class="v">${s.waveMax == null ? 'veri yok' : fmt(s.waveMax) + ' m'}</span><small>${s.period ? 'periyot ' + fmt(s.period) + ' sn' : ''}${s.waveDir != null ? ' · ' + windName(s.waveDir).toLowerCase() + 'dan' : ''}</small></div>
+      <div class="cond"><span class="eyebrow">Deniz suyu</span><span class="v">${s.sst == null ? '–' : fmt(s.sst) + ' °C'}</span><small>${s.sst != null && s.sstWeek != null ? (Math.abs(s.sst - s.sstWeek) < 0.2 ? 'bir haftadır sabit' : `bir haftada ${s.sst > s.sstWeek ? '+' : '−'}${fmt(Math.abs(s.sst - s.sstWeek))}°`) : ''}</small></div>
+      <div class="cond"><span class="eyebrow">Su berraklığı</span><span class="v">${s.turbid ? 'Bulanık' : 'Berrak'}</span><small>son 48 saat yağış ${fmt(s.rain48)} mm</small></div>
+      <div class="cond"><span class="eyebrow">Yağış / bulut</span><span class="v">${fmt(s.rain)} mm</span><small>bulut %${Math.round(s.cloud)} · hava ${Math.round(s.tMin)}–${Math.round(s.tMax)}°</small></div>
+      <div class="cond"><span class="eyebrow">Akıntı</span><span class="v">${s.cur == null ? '–' : fmt(s.cur) + ' km/sa'}</span><small>açık deniz modeli; kıyıda farklı olabilir</small></div>
+      <div class="cond"><span class="eyebrow">Basınç <em>kanıt zayıf</em></span><span class="v">${s.pStart ? Math.round(s.pStart) + ' → ' + Math.round(s.pEnd) : '–'} ${s.dp < -1.5 ? '↓' : s.dp > 1.5 ? '↑' : '→'}</span><small>hPa · puanı neredeyse etkilemez</small></div>
+      <div class="cond"><span class="eyebrow">Ay <em>kanıt karışık</em></span><div class="row">${moonSvg(d.moon.illum, d.moon.waxing)}<div><span class="v">%${Math.round(d.moon.illum * 100)}</span><br><small>${d.moon.waxing ? 'büyüyen' : 'küçülen'}</small></div></div></div>
     </div>
-  </section>
-
-  <section class="card">
-    <div class="section-h"><h2>Hedef ve takım</h2></div>
-    <div class="targets">${d.targets.map(t => `
-      <div class="target">${fishIcon(t.lvl)}<div><b>${esc(t.sp)}</b><div class="lure">${esc(t.lure)}</div><div class="how">${esc(t.how)}</div></div>
-      <span class="badge ${t.lvl === 'hi' ? 'b-good' : t.lvl === 'md' ? 'b-mid' : 'b-bad'}">${t.lvl === 'hi' ? 'YÜKSEK' : t.lvl === 'md' ? 'ORTA' : 'DÜŞÜK'}</span></div>`).join('')}</div>
+    <p class="muted sm mt">${esc(offNote)}</p>
   </section>`;
 }
 
 function renderWeek() {
-  const all = [];
-  state.days.forEach((d, i) => d.windows.forEach(w => { if (w.score != null) all.push({ i, d, w }); }));
-  all.sort((a, b) => b.w.score - a.w.score);
-  const head = state.insights?.headline;
+  const sess = [];
+  state.days.forEach((d, i) => dayView(d).wins.forEach(w => sess.push({ i, d, w })));
+  sess.sort((a, b) => b.w.score - a.w.score || a.i - b.i);
+  const flat = sess.length && sess[0].w.score - sess[Math.min(9, sess.length - 1)].w.score <= 1;
+  const sst = state.days[0]?.summary.sst;
   $('#tab-hafta').innerHTML = `
-  ${head ? `<div class="card"><span class="eyebrow">Claude'un haftalık notu</span><p style="margin-top:6px">${esc(head)}</p></div>` : ''}
   <section class="card">
-    <div class="section-h"><h2>Haftanın en iyi 5 penceresi</h2></div>
-    <div class="rank">${all.slice(0, 5).map((x, k) => {
-      const p = dParts(x.d.date);
+    <div class="section-h"><h2>Ne zaman gideyim?</h2><span class="eyebrow">${esc(spotLabel())}</span></div>
+    <div class="rank">${sess.slice(0, 5).map((x, k) => { const p = dParts(x.d.date), sp = x.w.species[0];
       return `<button class="rank-row" type="button" data-i="${x.i}"><span class="pos">${k + 1}</span>
-        <span><b style="font-family:var(--display)">${x.i === 0 ? 'Bugün' : p.long} ${x.w.name.toLowerCase()}</b><br><span class="muted" style="font-size:.85rem">${p.label} · ${x.w.from}–${x.w.to} · ${esc(x.w.top.best.spot.short)}</span></span>
-        <span class="sc" style="color:${col(x.w.score)}">${fmt(x.w.score)}</span></button>`;
-    }).join('')}</div>
+        <span><b>${x.i === 0 ? 'Bugün' : p.long} ${x.w.name.toLowerCase()}</b><br><span class="muted sm">${p.label} · ${x.w.from}–${x.w.to} · ${esc(x.w.spot.short)}${sp && sp.a >= 0.08 ? ' · ' + esc(sp.sp.name.split(',')[0]) : ''} · güven ${confidence(x.i)}</span></span>
+        <span class="sc" style="color:${hex(x.w.score)}">${fmt(x.w.score)}</span></button>`; }).join('')}</div>
+    ${flat ? `<p class="note">Bu hafta dilimler arasındaki fark küçük. Hava, balığın gelip gelmeyeceğini bu kadar ayırt edemiyor; asıl fark <b>saat</b> ve <b>nokta</b> seçiminden geliyor.</p>` : ''}
   </section>
   <section class="card">
     <div class="section-h"><h2>Gün ve dilim haritası</h2><span class="eyebrow">dokun: güne git</span></div>
     <div class="heat"><span></span>${WINDOWS.map(w => `<span class="h">${w.name}</span>`).join('')}
-      ${state.days.map((d, i) => `<span class="dl">${i === 0 ? 'Bugün' : dParts(d.date).short} <span class="muted" style="font-weight:400;font-size:.75rem">${dParts(d.date).d.getDate()}</span></span>` +
-        WINDOWS.map(w => { const x = d.windows.find(v => v.id === w.id); return x?.score == null ? '<span class="muted" style="text-align:center">–</span>' : `<button type="button" data-i="${i}" style="background:${colHex(x.score)};opacity:${0.45 + x.score / 18}">${fmt(x.score)}</button>`; }).join('')).join('')}
-    </div>
+      ${state.days.map((d, i) => `<span class="dl">${i === 0 ? 'Bugün' : dParts(d.date).short} <span class="muted">${dParts(d.date).d.getDate()}</span></span>` +
+        WINDOWS.map(w => { const x = dayView(d).wins.find(v => v.id === w.id); return !x ? '<span class="muted c">–</span>' : `<button type="button" data-i="${i}" style="background:${hex(x.score)}">${fmt(x.score)}</button>`; }).join('')).join('')}</div>
+    <div class="legend mt">${LEVELS.map((l, i) => `<span><i class="sq" style="background:${LVL_HEX[i]}"></i>${l}</span>`).join('')}</div>
   </section>
   <section class="card">
-    <div class="section-h"><h2>Rüzgâr ve dalga gidişatı</h2></div>
-    ${weekChart()}
-    <p class="muted" style="font-size:.85rem;margin-top:8px">İlk 2–3 gün en güvenilir. Sonraki günler eğilim gösterir; uygulamayı her açtığında tahmin yeniden hesaplanır.</p>
+    <div class="section-h"><h2>Rüzgâr ve dalga gidişatı</h2></div>${weekChart()}
+    <p class="muted sm mt">İlk iki gün güvenilir, 3–4. gün orta, sonrası yalnızca eğilim. Uygulamayı her açtığında yeniden hesaplanır.</p>
+  </section>
+  <section class="card">
+    <div class="section-h"><h2>Mevsim durumu</h2></div>
+    <p>${seasonNote(sst)}</p>
   </section>`;
   $('#tab-hafta').querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { state.sel = +b.dataset.i; switchTab('gun'); renderStrip(); renderDay(); }));
 }
-
+function seasonNote(sst) {
+  if (sst == null) return 'Deniz suyu sıcaklığı alınamadı.';
+  const mo = new Date().getMonth() + 1, t = `Deniz suyu şu an <b>${fmt(sst)} °C</b>. `;
+  if (sst > 21 && [10, 11, 12].includes(mo)) return t + 'Takvim sonbahar dese de su hâlâ yaz sonu sıcaklığında. Kalamar ve levrek gibi soğuk su türleri kıyıya henüz tam yanaşmadı; su 21 °C\'nin altına inince belirgin artmaları beklenir. Şimdilik sıcak su türleri (iskarmoz, hani, zargana, Kızıldeniz barbunu) daha gerçekçi hedefler.';
+  if (sst <= 21 && sst > 17) return t + 'Kalamar ve levrek için uygun aralığa girildi. Gün batımı çevresi ve gecenin ilk saatleri öne çıkar.';
+  if (sst <= 17) return t + 'Kış suyu. Levrek ve kalamar sezonu; sıcak su türleri çekildi. Balık yavaş yer, sahteyi yavaşlat.';
+  return t + 'Yaz suyu. Gündüz sıcağında balık derine iner; tan vakti, gün batımı ve gece öne çıkar.';
+}
 function weekChart() {
-  const hs = state.days.flatMap(d => d.hours);
-  if (!hs.length) return '';
-  const W = 760, H = 170, X0 = 30, X1 = W - 30, n = hs.length, x = i => X0 + i / (n - 1) * (X1 - X0);
-  const maxKn = Math.max(20, ...hs.map(h => h.gust)), yK = v => 140 - v / maxKn * 120;
-  const maxWv = Math.max(1.5, ...hs.map(h => h.wave ?? 0)), yV = v => 140 - v / maxWv * 120;
-  const gust = hs.map((h, i) => `${x(i).toFixed(1)},${yK(h.gust).toFixed(1)}`).join(' ');
-  const wind = hs.map((h, i) => `${x(i).toFixed(1)},${yK(h.wind).toFixed(1)}`).join(' ');
-  const wave = hs.filter(h => h.wave != null).length ? hs.map((h, i) => h.wave == null ? '' : `${x(i).toFixed(1)},${yV(h.wave).toFixed(1)}`).filter(Boolean).join(' ') : '';
-  let sep = '', lastD = null;
-  hs.forEach((h, i) => { if (h.date !== lastD) { lastD = h.date; sep += `<line x1="${x(i)}" x2="${x(i)}" y1="16" y2="140" stroke="#1d4a5d"/><text x="${x(i) + 4}" y="158" font-size="10" fill="#8fb1bb">${dParts(h.date).short}</text>`; } });
-  const ref = [12, 18].map(v => `<line x1="${X0}" x2="${X1}" y1="${yK(v)}" y2="${yK(v)}" stroke="${v === 12 ? '#3fd08a' : '#ff7a66'}" stroke-dasharray="3 5" opacity=".6"/><text x="${X1 + 3}" y="${yK(v) + 3}" font-size="9" fill="${v === 12 ? '#3fd08a' : '#ff7a66'}">${v}kn</text>`).join('');
-  return `<div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="7 günlük rüzgâr ve dalga">${sep}${ref}
-    <polyline points="${gust}" fill="none" stroke="#3fb6d9" stroke-width="1.2" opacity=".45"/>
-    <polyline points="${wind}" fill="none" stroke="#3fb6d9" stroke-width="2.2"/>
-    ${wave ? `<polyline points="${wave}" fill="none" stroke="#f3ead2" stroke-width="2" stroke-dasharray="5 3"/>` : ''}</svg></div>
-    <div class="legend"><span><i style="background:#3fb6d9"></i>Rüzgâr (ince: hamle)</span><span><i style="background:#f3ead2"></i>Dalga</span><span><i style="background:#3fd08a"></i>12 kn LRF üst sınırı</span><span><i style="background:#ff7a66"></i>18 kn zor</span></div>`;
+  const hs = state.days.flatMap(d => d.hours); if (!hs.length) return '';
+  const W = 760, H = 170, X0 = 30, X1 = W - 34, n = hs.length, x = i => X0 + i / (n - 1) * (X1 - X0);
+  const maxKn = Math.max(20, ...hs.map(h => h.gust)), yK = v => 140 - v / maxKn * 120, maxWv = Math.max(1.5, ...hs.map(h => h.wave ?? 0)), yV = v => 140 - v / maxWv * 120;
+  const line = f => hs.map((h, i) => `${x(i).toFixed(1)},${f(h).toFixed(1)}`).join(' ');
+  let sep = '', last = null; hs.forEach((h, i) => { if (h.date !== last) { last = h.date; sep += `<line x1="${x(i)}" x2="${x(i)}" y1="16" y2="140" stroke="#17404f"/><text x="${x(i) + 4}" y="158" font-size="10" fill="#8fb1bb">${dParts(h.date).short}</text>`; } });
+  const ref = [[10, '#4fd68e'], [18, '#ff6b5e']].map(([v, c]) => `<line x1="${X0}" x2="${X1}" y1="${yK(v)}" y2="${yK(v)}" stroke="${c}" stroke-dasharray="3 5" opacity=".7"/><text x="${X1 + 3}" y="${yK(v) + 3}" font-size="9" fill="${c}">${v}kn</text>`).join('');
+  const wave = hs.some(h => h.wave != null) ? `<polyline points="${hs.map((h, i) => h.wave == null ? '' : `${x(i).toFixed(1)},${yV(h.wave).toFixed(1)}`).filter(Boolean).join(' ')}" fill="none" stroke="#f3ead2" stroke-width="2" stroke-dasharray="5 3"/>` : '';
+  return `<div class="chart-wrap"><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="7 günlük rüzgâr ve dalga">${sep}${ref}<polyline points="${line(h => yK(h.gust))}" fill="none" stroke="#3fb6d9" stroke-width="1.2" opacity=".45"/><polyline points="${line(h => yK(h.wind))}" fill="none" stroke="#3fb6d9" stroke-width="2.2"/>${wave}</svg></div>
+    <div class="legend"><span><i style="background:#3fb6d9"></i>Rüzgâr (ince: hamle)</span><span><i style="background:#f3ead2"></i>Dalga</span><span><i style="background:#4fd68e"></i>10 kn: karşıdan hafif sahte sınırı</span><span><i style="background:#ff6b5e"></i>18 kn: zor</span></div>`;
+}
+
+function renderSpecies() {
+  const d = state.days[0], mo = new Date().getMonth(), sst = d?.summary.sst;
+  const spot = state.spot === 'best' ? SPOTS[0] : SPOTS.find(s => s.id === state.spot);
+  const cards = SPECIES.map(sp => {
+    const season = sp.ay[mo], hab = sp.hab(spot);
+    const maxA = d ? Math.max(...d.hours.map(h => h.per.find(p => p.spot.id === spot.id).species.find(x => x.sp.id === sp.id).a)) : 0;
+    const best = sp.isik.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, 2).map(x => PHASE_NAMES[PHASES[x[1]]].toLowerCase());
+    let status = season >= 0.75 ? 'Mevsiminde' : season >= 0.45 ? 'Mevsim başı / sonu' : 'Mevsim dışı';
+    if (sst != null) { if (sp.cool && sst > sp.cool[0]) status = `Su ${fmt(sst)}° — henüz sıcak`; if (sp.coldBelow && sst < sp.coldBelow) status = `Su ${fmt(sst)}° — soğudu`; }
+    return { sp, maxA, html: `<article class="card sp">
+      <div class="sp-h">${fishIcon(maxA >= 0.3 ? LVL_HEX[4] : maxA >= 0.18 ? LVL_HEX[3] : maxA >= 0.1 ? LVL_HEX[2] : '#3b6474')}<div><h3>${esc(sp.name)}</h3><span class="muted sm">${esc(status)} · en iyi: ${best.join(', ')}</span></div>
+        <span class="badge" style="background:${maxA >= 0.3 ? LVL_HEX[4] : maxA >= 0.18 ? LVL_HEX[3] : maxA >= 0.1 ? LVL_HEX[2] : '#3b6474'}">${maxA >= 0.3 ? 'BUGÜN OLASI' : maxA >= 0.18 ? 'BUGÜN MÜMKÜN' : maxA >= 0.1 ? 'ZAYIF' : 'BEKLENMEZ'}</span></div>
+      <div class="cal" aria-label="Aylara göre mevsim">${sp.ay.map((v, i) => `<span class="${i === mo ? 'now' : ''}"><i style="height:${4 + v * 22}px;opacity:${0.3 + v * 0.7}"></i>${MON_SHORT[i]}</span>`).join('')}</div>
+      <div class="ph" aria-label="Günün saatlerine göre aktiflik">${sp.isik.map((v, i) => `<span><i style="opacity:${0.12 + v * 0.88}"></i>${PHASE_NAMES[PHASES[i]]}</span>`).join('')}</div>
+      <p class="sm">${esc(sp.bilgi)}</p>
+      <p class="sm"><b>Sahte:</b> ${esc(sp.lure)}</p><p class="sm"><b>Çekiş:</b> ${esc(sp.how)}</p>
+      <p class="muted xs">${esc(spot.short)} için uygunluk ${Math.round(hab * 100)}% · sahteyle tutulabilirlik ${Math.round(sp.lrf * 100)}% · dayanak: ${sp.kanit === 'biyoloji' ? 'türün bilinen davranışı' : 'balıkçı ortak görüşü'}</p></article>` };
+  }).sort((a, b) => b.maxA - a.maxA);
+  $('#tab-turler').innerHTML = `<p class="muted sm">Bugüne ve <b>${esc(spot.name)}</b> noktasına göre sıralı. Çubuklar: üstte aylar (bulunduğun ay çerçeveli), altta günün saatleri.</p><div class="spgrid">${cards.map(c => c.html).join('')}</div>`;
 }
 
 function renderMap() {
   const d = state.days[state.sel]; if (!d) return;
   if (typeof L === 'undefined') { $('#map').innerHTML = '<p class="muted" style="padding:16px">Harita için internet bağlantısı gerekiyor.</p>'; return; }
   if (!state.map) {
-    state.map = L.map('map', { zoomControl: true, attributionControl: true }).setView([36.962, 27.325], 13);
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-      maxZoom: 18, attribution: 'Uydu: Esri, Maxar, Earthstar Geographics'
-    }).addTo(state.map);
+    state.map = L.map('map').setView([36.963, 27.325], 13);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, attribution: 'Uydu: Esri, Maxar, Earthstar Geographics' }).addTo(state.map);
     state.mapLayer = L.layerGroup().addTo(state.map);
   }
   state.mapLayer.clearLayers();
-  d.spots.forEach(x => {
-    const icon = L.divIcon({ className: '', html: `<div class="pin" style="background:${colHex(x.score)}">${fmt(x.score)}</div>`, iconSize: [40, 40], iconAnchor: [20, 20] });
-    L.marker([x.spot.lat, x.spot.lon], { icon, title: x.spot.name }).addTo(state.mapLayer)
-      .bindPopup(`<b>${esc(x.spot.name)}</b><br>${x.sheltered ? 'Kuytu' : x.exposed ? 'Rüzgâra açık' : 'Yandan rüzgâr'}${x.edge ? ' · ' + esc(x.edge) : ''}`);
+  SPOTS.forEach(sp => {
+    const ws = d.windows.filter(w => w.score != null).map(w => ({ w, b: w.bySpot.find(x => x.spot.id === sp.id) })), top = ws.reduce((a, b) => (b.b.score > a.b.score ? b : a));
+    const icon = L.divIcon({ className: '', html: `<div class="pin" style="background:${hex(top.b.score)}">${fmt(top.b.score)}</div>`, iconSize: [42, 42], iconAnchor: [21, 21] });
+    L.marker([sp.lat, sp.lon], { icon, title: sp.name }).addTo(state.mapLayer).bindPopup(`<b>${esc(sp.name)}</b><br>En iyi: ${top.w.name.toLowerCase()} ${fmt(top.b.score)} · koşul ${fmt(top.b.cond)}<br>${esc(sp.tip)}`);
   });
   setTimeout(() => state.map.invalidateSize(), 50);
   const s = d.summary;
-  $('#map-legend').innerHTML = `<div class="wind-badge">${arrowSvg(s.dirMorning ?? 0, 22, '#9fe3f2')}<span><b>${dParts(d.date).label}</b> · ${windName(s.dirMorning ?? 0)} ${Math.round(s.windMin)}–${Math.round(s.windMax)} kn. İşaretlerdeki sayı noktanın sabah+akşam puanı. Konumlar yaklaşık.</span></div>`;
+  $('#map-legend').innerHTML = `<div class="card row">${arrowSvg(s.dirMorning ?? 0, 24, '#9fe3f2')}<span class="sm"><b>${dParts(d.date).label}</b> · ${windName(s.dirMorning ?? 0)} ${Math.round(s.windMin)}–${Math.round(s.windMax)} kn. İşaretlerdeki sayı o noktanın günün en iyi dilimindeki av şansı. Konumlar yaklaşıktır.</span></div>`;
 }
 
+// ---------- defter ----------
 function renderDefter() {
-  const def = state.insights?.defter || [];
+  const log = [...state.log].sort((a, b) => b.date.localeCompare(a.date));
+  const n = log.length, hit = log.filter(t => t.fish > 0).length;
+  const bands = LEVELS.map((l, i) => { const a = log.filter(t => t.pred != null && levelOf(t.pred) === i); return { l, i, n: a.length, hit: a.filter(t => t.fish > 0).length }; });
+  const off = state.off || { global: 0, n: 0, win: {}, spot: {} };
+  const today = isoToday(), minDate = state.all[0]?.date || today;
   $('#tab-defter').innerHTML = `
-  <section class="card" id="install-card" ${deferredPrompt ? '' : 'hidden'}>
-    <h2>Telefona yükle</h2><p class="muted" style="margin:6px 0 10px">Ana ekrana ikon olarak eklenir, tam ekran açılır.</p>
-    <button class="icon-btn" style="width:auto;padding:0 16px" id="install-btn" type="button">Uygulamayı yükle</button>
-  </section>
   <section class="card">
-    <div class="section-h"><h2>Av defteri</h2></div>
-    <p class="muted" style="font-size:.9rem;margin-bottom:10px">Avdan dönünce Claude'a yaz: tarih, nokta ve kenar, saat, sahte ve renk, ne tuttun. Kayıtlar puanlamayı senin noktalarına göre ayarlar.</p>
-    <div class="tbl"><table><thead><tr><th>Nokta</th><th>Tür</th><th>Sıklık</th><th>Not</th></tr></thead>
-    <tbody>${def.map(r => `<tr><td>${esc(r.spot)}</td><td><b>${esc(r.species)}</b></td><td>${esc(r.freq)}</td><td class="muted">${esc(r.note)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Henüz kayıt yok.</td></tr>'}</tbody></table></div>
+    <div class="section-h"><h2>Av ekle</h2><span class="eyebrow">boş dönüşler dahil</span></div>
+    <p class="muted sm">Her kaydı gir, özellikle boş döndüklerini. Uygulama o günün havasını geri bakıp kendi puanıyla sonucu karşılaştırır ve puanlarını buna göre düzeltir. Son 31 günün avlarını şimdi girebilirsin.</p>
+    <form id="trip" class="form">
+      <label>Tarih<input type="date" id="f-date" value="${today}" min="${minDate}" max="${today}" required></label>
+      <label>Dilim<select id="f-win">${WINDOWS.map(w => `<option value="${w.id}">${w.name}</option>`).join('')}</select></label>
+      <label>Nokta<select id="f-spot">${SPOTS.map(s => `<option value="${s.id}" ${s.id === state.spot ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
+      <label>Sonuç<select id="f-fish"><option value="0">Boş döndüm</option><option value="1">1–2 balık</option><option value="2">3 ve üstü</option></select></label>
+      <label class="wide">Ne tuttun, hangi sahte?<input type="text" id="f-note" maxlength="120" placeholder="örn. 2 hani, 3 g + 2&quot; kahve silikon"></label>
+      <button class="btn" type="submit">Kaydet</button>
+    </form>
   </section>
+
   <section class="card">
-    <div class="section-h"><h2>Puanlama nasıl yapılıyor</h2></div>
-    <details open><summary>Rüzgâr ve noktalar</summary><ul>
-      <li>Dört nokta da güneye bakar. Kuzeyli rüzgârda (poyraz, yıldız, karayel) rüzgâr arkadan gelir, deniz düz, atış uzun: LRF için en iyisi.</li>
-      <li>Lodos, kıble ve keşişlemede dalga ve karşı rüzgâr. Batılı rüzgârda Bağla ve Karaincir'in batı kayalıkları, doğulu rüzgârda doğu tarafı kuytu kalır.</li>
-      <li>4–12 knot ideal. 13–18 knot karşıdan zor, 5–7 g'a çık. 18 knot ya da 25 knot hamle üstü güvenlik uyarısı.</li></ul></details>
-    <details><summary>Dalga</summary><ul><li>Kıyıda 0,5 m'ye kadar LRF için ideal; 0,5–0,8 m köpüklü kaya önünde levrek; 1 m üstü ıslak kayaya çıkma.</li><li>Kıyıdaki dalga, açık deniz tahmininden rüzgârın kıyıya göre yönüyle hesaplanır.</li></ul></details>
-    <details><summary>Basınç</summary><ul><li>12 saatte 2 hPa'dan fazla düşüş (cephe öncesi) +1,5; hafif düşüş +1; cephe sonrası hızlı yükseliş −1,5; 1025 üstü −1.</li><li>Basıncın etkisi bilimsel olarak tartışmalı; orta ağırlık verildi.</li></ul></details>
-    <details><summary>Saat, ışık ve ay</summary><ul><li>Sabah (gün doğumundan 1 saat önce → 2 saat sonra) ve akşam (gün batımından 1,5 saat önce → 1 saat 15 dk sonra) +1,5.</li><li>Öğlen güneşli ve durgunsa −0,5; bulutluysa +0,5. Kuvvetli yağış −1.</li><li>Gece: ay %80 üstü −0,5, %20 altı +0,5.</li></ul></details>
-    <details><summary>Su</summary><ul><li>Su 13 °C altında ya da 3 günde 2 °C'den fazla soğuduysa −1. Son 48 saatte 10 mm üstü yağış: hafif bulanık su, levrek için artı.</li><li>Çipura Kasım–Aralık'ta derine çekilir, ilkbaharda kıyıya döner.</li></ul></details>
-    <p class="muted" style="font-size:.85rem;margin-top:10px">Asgari av boyları için 6/2 Amatör Avcılık Tebliği'ne bak. Veri: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (ECMWF, DWD, Météo-France modelleri). Fırtına uyarıları: <a href="https://pirireis.mgm.gov.tr" target="_blank" rel="noopener">MGM Piri Reis</a>.</p>
-  </section>`;
+    <div class="section-h"><h2>Karne</h2><span class="eyebrow">${n} av · ${hit} balıklı</span></div>
+    ${n ? `<div class="tbl"><table><thead><tr><th>Uygulamanın dediği</th><th>Av</th><th>Balıklı</th><th>İsabet</th></tr></thead><tbody>
+      ${bands.filter(b => b.n).map(b => `<tr><td><span class="cellsc" style="background:${LVL_HEX[b.i]}">${b.l}</span></td><td class="num">${b.n}</td><td class="num">${b.hit}</td><td class="num">%${Math.round(b.hit / b.n * 100)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Kayıtların tarihi tahmin aralığının dışında.</td></tr>'}</tbody></table></div>
+      <p class="sm mt">Defter düzeltmesi: <b class="num">${off.global > 0 ? '+' : ''}${fmt(off.global)}</b> puan${Object.keys(off.win).length || Object.keys(off.spot).length ? ' (dilim ve nokta bazında ek düzeltme var)' : ''}. İyi çalışan bir tahminde üst satırların isabeti alt satırlardan yüksek olur.</p>` : '<p class="muted">Henüz kayıt yok. İlk üç kayıttan sonra düzeltme belirginleşir.</p>'}
+  </section>
+
+  <section class="card">
+    <div class="section-h"><h2>Kayıtlar</h2>${n ? '<button class="linkbtn" id="export" type="button">Defteri kopyala</button>' : ''}</div>
+    <div class="loglist">${log.map(t => { const p = dParts(t.date); return `<div class="logrow"><span class="dot" style="background:${t.fish > 1 ? LVL_HEX[4] : t.fish ? LVL_HEX[3] : LVL_HEX[0]}"></span>
+      <div><b>${p.label} ${p.short} · ${WINDOWS.find(w => w.id === t.win).name.toLowerCase()} · ${esc(SPOTS.find(s => s.id === t.spot)?.short)}</b><br><span class="muted sm">${t.fish > 1 ? '3 ve üstü' : t.fish ? '1–2 balık' : 'Boş'}${t.note ? ' · ' + esc(t.note) : ''}${t.pred != null ? ` · uygulama: ${fmt(t.pred)} (${lvl(t.pred).toLowerCase()})` : ''}</span></div>
+      <button class="linkbtn" type="button" data-del="${t.id}" aria-label="Kaydı sil">Sil</button></div>`; }).join('') || '<p class="muted">—</p>'}</div>
+    <textarea id="export-out" class="export" readonly hidden></textarea>
+  </section>
+
+  <section class="card">
+    <div class="section-h"><h2>Bu puanlar neye dayanıyor?</h2></div>
+    <details open><summary>Dürüst sınırlar</summary><ul>
+      <li>Hava durumundan balığın yiyip yemeyeceğini güvenilir biçimde söyleyen kanıtlanmış bir yöntem yok. Ay ve "solunar" tabloları test edildiği çalışmada av verimini öngöremedi; basıncın etkisi de gösterilemedi.</li>
+      <li>Bu yüzden uygulama iki şeyi ayırır: <b>koşul</b> (rahat ve güvenli atış; iyi tahmin edilir) ve <b>av şansı</b> (hangi tür, hangi saatte, hangi noktada; kaba tahmin).</li>
+      <li>Kıyıdan hafif sahteyle boş dönmek olağandır. Puan dilimleri ve noktaları sıralar, balığı garanti etmez.</li></ul></details>
+    <details><summary>Av şansı nasıl hesaplanıyor</summary><ul>
+      <li>Her tür için: mevsim (ay) × günün saati (tan, sabah, öğle, ikindi, gün batımı, gece) × nokta uygunluğu (kaya, kum, ışık, burun) × sahteyle tutulabilirlik.</li>
+      <li>Deniz suyu sıcaklığı: kalamar ve levrek su soğuyunca, iskarmoz ve Kızıldeniz barbunu su sıcakken.</li>
+      <li>Deniz durumu: levrek ve sargoz köpüklü suyu sever, dümdüz denizde düşer; kalamar ve zargana çırpıntıda ve bulanık suda düşer.</li>
+      <li>Türlerin ihtimalleri birleştirilir, sonra atış koşulu kötüyse kırpılır. Defterin varsa sonuç ona göre kaydırılır.</li></ul></details>
+    <details><summary>Koşul nasıl hesaplanıyor</summary><ul>
+      <li>Rüzgâr karşıdan 6 knot üstü hafif sahteyi zorlar, 10 üstü ciddi düşürür, 18 üstü avı bitirir. Arkadan rüzgâr zarar vermez.</li>
+      <li>Kıyıdaki dalga, açık deniz dalgasının o kıyıya bakış açısına göre hesaplanır: 0,6 m üstü çırpıntı, 0,9 m üstü zor, 1,2 m üstü tehlikeli.</li>
+      <li>Yağmur ve 25 knot üstü hamle puanı düşürür.</li></ul></details>
+    <p class="muted xs mt">Veri: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a> (ECMWF, DWD, Météo-France). Fırtına uyarıları için <a href="https://pirireis.mgm.gov.tr" target="_blank" rel="noopener">MGM Piri Reis</a>. Asgari av boyları: 6/2 Amatör Avcılık Tebliği.</p>
+  </section>
+  <section class="card" id="install-card" ${deferredPrompt ? '' : 'hidden'}><h2>Telefona yükle</h2><p class="muted sm mt">Ana ekrana ikon olarak eklenir, tam ekran açılır.</p><button class="btn mt" id="install-btn" type="button">Uygulamayı yükle</button></section>`;
+
+  $('#trip').addEventListener('submit', e => {
+    e.preventDefault();
+    state.log.push({ id: Date.now().toString(36), date: $('#f-date').value, win: $('#f-win').value, spot: $('#f-spot').value, fish: +$('#f-fish').value, note: $('#f-note').value.trim() });
+    rebuild();
+  });
+  $('#tab-defter').querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { state.log = state.log.filter(t => t.id !== b.dataset.del); rebuild(); }));
+  const ex = $('#export'); if (ex) ex.addEventListener('click', async () => {
+    const txt = JSON.stringify(state.log.map(({ id, ...r }) => r));
+    try { await navigator.clipboard.writeText(txt); ex.textContent = 'Kopyalandı'; } catch (e) { const o = $('#export-out'); o.hidden = false; o.value = txt; o.select(); }
+  });
   const ib = $('#install-btn'); if (ib) ib.addEventListener('click', async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); await deferredPrompt.userChoice; deferredPrompt = null; $('#install-card').hidden = true; });
 }
 
@@ -382,9 +464,8 @@ function switchTab(t) {
   state.tab = t;
   document.querySelectorAll('.tab').forEach(s => s.hidden = s.id !== 'tab-' + t);
   document.querySelectorAll('.tabbar button').forEach(b => b.dataset.tab === t ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current'));
-  if (t === 'hafta') renderWeek();
-  if (t === 'harita') renderMap();
-  if (t === 'defter') renderDefter();
+  $('#spotbar').hidden = t === 'harita' || t === 'defter';
+  if (t === 'hafta') renderWeek(); if (t === 'turler') renderSpecies(); if (t === 'harita') renderMap(); if (t === 'defter') renderDefter();
   window.scrollTo({ top: 0 });
 }
 
@@ -392,7 +473,10 @@ function switchTab(t) {
 let deferredPrompt = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredPrompt = e; const c = $('#install-card'); if (c) c.hidden = false; });
 document.querySelectorAll('.tabbar button').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
-$('#refresh').addEventListener('click', () => load(true));
+$('#refresh').addEventListener('click', load);
+state.log = read(LOG_KEY, []);
+const savedSpot = read(SPOT_KEY, 'ilginlar'); state.spot = (savedSpot === 'best' || SPOTS.some(s => s.id === savedSpot)) ? savedSpot : 'ilginlar';
 $('#day').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
+renderSpotbar();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-load(false);
+load();

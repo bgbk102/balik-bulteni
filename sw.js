@@ -1,5 +1,5 @@
-// Uygulama kabuğunu önbellekler; tahmin ve Claude notları her zaman ağdan, olmazsa önbellekten gelir.
-const SHELL = 'bb-shell-v1';
+// Uygulama kabuğunu önbellekler; tahmin her zaman ağdan, olmazsa önbellekten gelir.
+const SHELL = 'bb-shell-v2';
 const FILES = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/engine.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES))); self.skipWaiting(); });
