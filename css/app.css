@@ -148,7 +148,11 @@ tr:last-child td { border-bottom: 0; }
 .ph i { display: block; height: 10px; border-radius: 3px; background: var(--foam); }
 
 /* Harita */
-.map-card { padding: 0; overflow: hidden; }
+.map-card { padding: 0; overflow: hidden; position: relative; }
+.map-tools { position: absolute; top: 10px; right: 10px; z-index: 500; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: calc(100% - 70px); }
+.btn-sm { padding: 9px 14px; border-radius: 12px; border: 0; background: var(--foam); color: #04141b; font-weight: 700; font-size: .9rem; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+.btn-sm.on { background: var(--l4); }
+.maphint { background: rgba(4,20,27,.85); color: var(--ink); font-size: .82rem; padding: 7px 10px; border-radius: 10px; }
 #map { height: min(62vh, 520px); width: 100%; background: var(--bg2); }
 .leaflet-container { font-family: var(--body); }
 .pin { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font: 800 .95rem var(--display); color: #04141b; border: 3px solid #fff; box-shadow: 0 4px 12px rgba(0, 0, 0, .45); }

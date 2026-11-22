@@ -1,5 +1,5 @@
 // Uygulama kabuğunu önbellekler; tahmin her zaman ağdan, olmazsa önbellekten gelir.
-const SHELL = 'bb-shell-v3';
+const SHELL = 'bb-shell-v4';
 const FILES = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/engine.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES))); self.skipWaiting(); });
@@ -12,7 +12,7 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   // Önce ağ: uygulama dosyaları da güncel gelsin, çevrimdışıyken önbellek
   e.respondWith(
-    fetch(e.request).then(r => {
+    fetch(url.origin === location.origin ? new Request(e.request, { cache: 'no-cache' }) : e.request).then(r => {
       if (r.ok && (url.origin === location.origin || url.hostname === 'unpkg.com' || url.hostname.endsWith('gstatic.com') || url.hostname.endsWith('googleapis.com'))) {
         const copy = r.clone(); caches.open(SHELL).then(c => c.put(e.request, copy));
       }

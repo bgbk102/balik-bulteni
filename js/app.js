@@ -2,6 +2,7 @@ import { SPOTS, WINDOWS, SPECIES, PHASES, LEVELS, levelOf, buildDays, calibrate,
 
 const WX_POINT = { lat: 36.97, lon: 27.33 };   // Bağla–Karaincir arası kara noktası (rüzgâr, basınç, yağış)
 const SEA_POINT = { lat: 36.93, lon: 27.33 };  // koyların hemen açığı (dalga, deniz suyu, akıntı)
+const APP_VERSION = '2.1';
 const CACHE_KEY = 'bb-forecast-v2', LOG_KEY = 'bb-log-v1', SPOT_KEY = 'bb-spot', POS_KEY = 'bb-pos-v1';
 const TR_DAYS = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 const TR_DAYS_LONG = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
@@ -47,7 +48,7 @@ async function load() {
   state.raw = { wx, marine };
   rebuild();
   const t = state.fetchedAt;
-  $('#status').textContent = `${state.live ? 'Güncel' : 'Çevrimdışı · son kayıt'} · ${t.getDate()} ${TR_MONTHS[t.getMonth()]} ${pad(t.getHours())}:${pad(t.getMinutes())}${marine ? '' : ' · deniz verisi yok'}`;
+  $('#status').textContent = `v${APP_VERSION} · ${state.live ? 'Güncel' : 'Çevrimdışı · son kayıt'} · ${t.getDate()} ${TR_MONTHS[t.getMonth()]} ${pad(t.getHours())}:${pad(t.getMinutes())}${marine ? '' : ' · deniz verisi yok'}`;
   $('#refresh').classList.remove('spin');
 }
 function rebuild() {
@@ -389,7 +390,11 @@ function renderMap() {
     mk.on('dragend', () => { const ll = mk.getLatLng(); sp.lat = +ll.lat.toFixed(5); sp.lon = +ll.lng.toFixed(5); savePos(); renderMap(); });
     if (!state.editPos) mk.bindPopup(`<b>${esc(sp.name)}</b><br>En iyi: ${top.w.name.toLowerCase()} ${fmt(top.b.score)} · koşul ${fmt(top.b.cond)}<br>${esc(sp.tip)}`);
   });
-  setTimeout(() => state.map.invalidateSize(), 50);
+  setTimeout(() => { state.map.invalidateSize(); if (!state.mapFitted) { state.mapFitted = true; state.map.fitBounds(SPOTS.map(sp => [sp.lat, sp.lon]), { padding: [40, 40], maxZoom: 15 }); } }, 50);
+  $('#map-tools').innerHTML = state.editPos
+    ? '<span class="maphint">İşareti basılı tutup kıyıya sürükle</span><button class="btn-sm on" id="pos-done2" type="button">Bitti</button>'
+    : '<button class="btn-sm" id="pos-edit2" type="button">Konumları düzelt</button>';
+  const t2 = $('#pos-edit2') || $('#pos-done2'); if (t2) t2.addEventListener('click', () => { state.editPos = !state.editPos; renderMap(); });
   const s = d.summary;
   $('#map-legend').innerHTML = `<div class="card row">${arrowSvg(s.dirMorning ?? 0, 24, '#9fe3f2')}<span class="sm"><b>${dParts(d.date).label}</b> · ${windName(s.dirMorning ?? 0)} ${Math.round(s.windMin)}–${Math.round(s.windMax)} kn. İşaretlerdeki sayı o noktanın günün en iyi dilimindeki av şansı. Konumlar yaklaşıktır.</span></div>` +
     `<div class="card"><div class="section-h"><h2>Konumları düzelt</h2>${state.editPos ? '<button class="linkbtn" id="pos-done" type="button">Bitti</button>' : '<button class="linkbtn" id="pos-edit" type="button">Düzenle</button>'}</div>
@@ -495,5 +500,11 @@ loadPos();
 const savedSpot = read(SPOT_KEY, 'ilginlar'); state.spot = (savedSpot === 'best' || SPOTS.some(s => s.id === savedSpot)) ? savedSpot : 'ilginlar';
 $('#day').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div>';
 renderSpotbar();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator) {
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  // yeni sürüm devreye girince sayfayı bir kez yenile, eski dosyalar ekranda kalmasın
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+  navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(() => {});
+}
 load();
